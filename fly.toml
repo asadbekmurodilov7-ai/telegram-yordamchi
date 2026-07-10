@@ -4,6 +4,11 @@ primary_region = "fra"
 [build]
 
 [env]
+  DB_FILE = "/data/bot.db"
+
+[mounts]
+  source = "botdata"
+  destination = "/data"
 
 [[vm]]
   size = "shared-cpu-1x"

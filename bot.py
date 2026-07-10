@@ -16,6 +16,11 @@ Funksiyalar:
   - AI orqali post    - ega suhbatda "kanalimga shu haqida yoz" desa, AI post
                       matnini tayyorlab tasdiq so'raydi, "ha" desa (yoki vaqt
                       aytilgan bo'lsa o'sha vaqtda) NEWS_KANAL'ga joylaydi
+  - AI dayjest        - kuniga 3 mahal (09,14,20) internetdan AI yangiliklarini
+                      topib kanalga dayjest joylaydi (/dayjest bilan qo'lda ham)
+  - So'rovnoma        - suhbatda "kanalga so'rovnoma qo'y" desa poll joylaydi
+  - Post navbati      - /navbatga bilan post qo'shiladi, har 4 soatda kanalga
+  - Hujjat xulosasi   - PDF yoki matnli fayl yuborilsa Claude o'qib xulosalaydi
 
 Muhit o'zgaruvchilari (environment variables):
   BOT_TOKEN          - BotFather bergan token (majburiy)
@@ -68,9 +73,10 @@ FARGONA = {"nom": "Farg'ona", "lat": 40.3864, "lon": 71.7843}
 
 # Egasining suhbat uslubi - bazadagi 'uslub' sozlamasi bo'lmasa shu ishlatiladi
 STANDART_USLUB = (
-    "Ismim Asadbek. Men o'zbek yigitiman, do'stona va samimiy gaplashaman. "
-    "Qisqa va tabiiy javob beraman, kerak joyda hazil ham qilib qo'yaman. "
-    "Rasmiyatchiliksiz, oddiy so'zlashuv uslubida yozaman."
+    "Ismim Asadbek. IT va texnologiyaga qiziqaman. Erkin, oddiy so'zlashuv "
+    "uslubida yozaman, lekin odamlarga hurmat bilan ('siz' deb) murojaat qilaman. "
+    "Javoblarim o'rtacha uzunlikda - na juda qisqa, na juda uzun. Ko'proq jiddiy "
+    "va aniq gaplashaman, hazilni kamdan-kam ishlataman."
 )
 
 # ---------------------------------------------------------------- ma'lumotlar bazasi
@@ -87,6 +93,10 @@ def db():
     conn.execute(
         "CREATE TABLE IF NOT EXISTS vaqtli_postlar ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, matn TEXT, vaqt TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS navbat ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, matn TEXT, qoshilgan TEXT)"
     )
     return conn
 
@@ -432,6 +442,68 @@ async def kanallarni_tekshir(context: ContextTypes.DEFAULT_TYPE):
             log.error("Kanal tekshirish xatosi (%s): %s", nom, e)
 
 
+async def ai_dayjest(context: ContextTypes.DEFAULT_TYPE):
+    """Kuniga bir necha marta internetdan AI yangiliklarini topib kanalga dayjest joylaydi."""
+    if not NEWS_KANAL or not ANTHROPIC_API_KEY:
+        return
+    uslub_matni = sozlama_ol("uslub", STANDART_USLUB)
+    oldingi = sozlama_ol("dayjest_xotira", "")
+    oldingi_matn = oldingi if oldingi else "(hali dayjest yo'q)"
+
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        javob = await client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=1500,
+            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 4}],
+            system=(
+                "Sen AI (sun'iy intellekt) mavzusidagi Telegram kanali uchun kontent "
+                "tayyorlaysan. Vazifang: internetdan bugungi eng muhim va so'nggi AI "
+                "yangiliklarini qidirib top (web_search ishlatib), ulardan 3-5 tasini "
+                "tanla va o'zbek tilida qisqa, qiziqarli dayjest post yoz. Har yangilikni "
+                "1-2 jumlada ber, mos emoji bilan chiroyli formatla. Post boshida qisqa "
+                "sarlavha bo'lsin (masalan '\U0001F916 Bugungi AI yangiliklari').\n\n"
+                "Postni quyidagi uslubdagi odam o'zi yozgandek, uning ovozida yoz:\n"
+                f"{uslub_matni}\n\n"
+                "MUHIM: quyidagi mavzular oldingi dayjestlarda berilgan - ularni "
+                f"TAKRORLAMA, faqat yangi yangiliklarni ber:\n{oldingi_matn}\n\n"
+                "Agar hech qanday yangi muhim AI yangiligi topilmasa, faqat 'YOQ' deb yoz. "
+                "Aks holda faqat postning o'zini yoz, boshqa hech qanday izoh qo'shma."
+            ),
+            messages=[{
+                "role": "user",
+                "content": "Bugungi eng so'nggi AI yangiliklari dayjestini tayyorla.",
+            }],
+        )
+        post = "\n".join(
+            b.text for b in javob.content if getattr(b, "type", None) == "text"
+        ).strip()
+        if not post or post.upper().startswith("YOQ"):
+            log.info("AI dayjest: yangi yangilik topilmadi")
+            return
+
+        await _postni_yubor(context.bot, NEWS_KANAL, post)
+        # Takrorlashning oldini olish uchun oxirgi dayjestlarni eslab qolamiz
+        yangi_xotira = (post[:700] + "\n---\n" + oldingi)[:2500]
+        sozlama_qoy("dayjest_xotira", yangi_xotira)
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                ADMIN_CHAT_ID, f"\U0001F4F0 AI dayjest kanalingizga joylandi:\n\n{post}"
+            )
+    except Exception as e:
+        log.error("AI dayjest xatosi: %s", e)
+
+
+async def dayjest_buyrug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Qo'lda AI dayjestni hozir tayyorlab kanalga joylaydi (sinov uchun)."""
+    if not egami(update):
+        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    await update.message.reply_text("\U0001F50D AI yangiliklarini qidiryapman, biroz kuting...")
+    await ai_dayjest(context)
+
+
 async def kanal_qosh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not egami(update):
         await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
@@ -528,6 +600,98 @@ async def post_qil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {NEWS_KANAL} ga joylandi!")
 
 
+# ---------------------------------------------------------------- post navbati
+async def navbatga_qosh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Postni navbatga qo'shadi - bot uni kun davomida avtomatik joylaydi."""
+    if not egami(update):
+        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    matn = " ".join(context.args) if context.args else ""
+    javob_uchun = update.message.reply_to_message
+    if not matn and javob_uchun:
+        matn = javob_uchun.text or javob_uchun.caption or ""
+    if not matn.strip():
+        await update.message.reply_text(
+            "Navbatga qo'shish uchun:\n/navbatga Post matni\n"
+            "yoki matnli xabarga javob qilib /navbatga deb yozing."
+        )
+        return
+    conn = db()
+    conn.execute(
+        "INSERT INTO navbat (matn, qoshilgan) VALUES (?, ?)",
+        (matn.strip(), datetime.now(VAQT_ZONASI).isoformat()),
+    )
+    soni = conn.execute("SELECT COUNT(*) FROM navbat").fetchone()[0]
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        f"✅ Navbatga qo'shildi (navbatda {soni} ta post). "
+        "Kunduzi har 4 soatda bittadan avtomatik joylayman."
+    )
+
+
+async def navbat_korsat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Navbatdagi postlar ro'yxatini ko'rsatadi."""
+    if not egami(update):
+        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    conn = db()
+    qatorlar = conn.execute("SELECT id, matn FROM navbat ORDER BY id").fetchall()
+    conn.close()
+    if not qatorlar:
+        await update.message.reply_text(
+            "Navbat bo'sh. /navbatga bilan post qo'shing.\n"
+            "Tozalash uchun: /navbat_tozala"
+        )
+        return
+    javob = f"\U0001F4CB Navbatda {len(qatorlar)} ta post:\n\n"
+    for i, (pid, matn) in enumerate(qatorlar, 1):
+        javob += f"{i}. {matn[:80]}{'...' if len(matn) > 80 else ''}\n"
+    javob += "\nTozalash uchun: /navbat_tozala"
+    await update.message.reply_text(javob)
+
+
+async def navbat_tozala(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Navbatni to'liq tozalaydi."""
+    if not egami(update):
+        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    conn = db()
+    conn.execute("DELETE FROM navbat")
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("\U0001F5D1 Navbat tozalandi.")
+
+
+async def navbatni_joyla(context: ContextTypes.DEFAULT_TYPE):
+    """Kunduzi har 4 soatda navbatdan bitta postni kanalga joylaydi."""
+    if not NEWS_KANAL:
+        return
+    soat = datetime.now(VAQT_ZONASI).hour
+    if soat < 8 or soat >= 23:   # kechasi joylamaymiz
+        return
+    conn = db()
+    qator = conn.execute("SELECT id, matn FROM navbat ORDER BY id LIMIT 1").fetchone()
+    conn.close()
+    if not qator:
+        return
+    pid, matn = qator
+    try:
+        await _postni_yubor(context.bot, NEWS_KANAL, matn)
+        conn = db()
+        conn.execute("DELETE FROM navbat WHERE id = ?", (pid,))
+        qoldi = conn.execute("SELECT COUNT(*) FROM navbat").fetchone()[0]
+        conn.commit()
+        conn.close()
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                ADMIN_CHAT_ID,
+                f"\U0001F4E4 Navbatdagi post kanalga joylandi (navbatda yana {qoldi} ta):\n\n{matn[:300]}",
+            )
+    except Exception as e:
+        log.error("Navbatdagi postni joylashda xato: %s", e)
+
+
 def xabar_matni(msg) -> str:
     """Xabardan matnni oladi - forward, caption va reply kontekstini ham qo'shadi."""
     matn = msg.text or msg.caption or ""
@@ -590,6 +754,28 @@ POST_TAKLIF_TOOL = {
     },
 }
 
+SOROVNOMA_TAKLIF_TOOL = {
+    "name": "sorovnoma_taklif",
+    "description": (
+        "Foydalanuvchi kanaliga so'rovnoma (poll) joylashni so'raganda chaqir - "
+        "masalan 'kanalga so'rovnoma qo'y', 'ovoz berish qo'shamiz' kabi so'rovlarda. "
+        "Savol va 2-10 ta javob variantini o'zing tayyorlab shu tool orqali taklif "
+        "qil - poll'ni to'g'ridan-to'g'ri sen joylamaysan, bot tasdiq so'raydi."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "savol": {"type": "string", "description": "So'rovnoma savoli (300 belgigacha)."},
+            "variantlar": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "2 tadan 10 tagacha javob varianti (har biri 100 belgigacha).",
+            },
+        },
+        "required": ["savol", "variantlar"],
+    },
+}
+
 TASDIQ_SOZLARI = {"ha", "xa", "ha.", "mayli", "ok", "ok.", "tasdiqlayman", "joyla", "joylayver", "ha joyla"}
 BEKOR_SOZLARI = {"yo'q", "yoq", "yo'q.", "yoq.", "bekor", "bekor qil", "kerak emas", "yo'q kerak emas"}
 
@@ -614,6 +800,56 @@ async def _rasm_kontenti(msg) -> list:
         return []
 
 
+async def _hujjat_kontenti(msg):
+    """PDF/matnli hujjatni Claude uchun tayyorlaydi. (bloklar, qoshimcha_matn) qaytaradi."""
+    hujjat = msg.document
+    if not hujjat:
+        return [], ""
+    nom = (hujjat.file_name or "").lower()
+    turi = hujjat.mime_type or ""
+    if hujjat.file_size and hujjat.file_size > 20 * 1024 * 1024:
+        return [], "[Hujjat juda katta - 20MB dan oshmasligi kerak]"
+    try:
+        fayl = await hujjat.get_file()
+        baytlar = bytes(await fayl.download_as_bytearray())
+    except Exception as e:
+        log.error("Hujjatni yuklashda xato: %s", e)
+        return [], ""
+
+    if turi == "application/pdf" or nom.endswith(".pdf"):
+        return [{
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(baytlar).decode(),
+            },
+        }], ""
+
+    if turi.startswith("text/") or nom.endswith((".txt", ".md", ".csv", ".json")):
+        matn = baytlar.decode("utf-8", errors="ignore")[:20000]
+        return [], f"[Yuborilgan hujjat matni]:\n{matn}"
+
+    return [], "[Bu hujjat turini o'qiy olmayman - PDF yoki matnli fayl yuboring]"
+
+
+async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ovozli xabar kelganda - hozircha matnga o'gira olmasligimizni bildiradi."""
+    msg = update.effective_message
+    if msg is None:
+        return
+    biznesmi = update.business_message is not None
+    if biznesmi and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID:
+        return
+    try:
+        await msg.reply_text(
+            "Ovozli xabarni hozircha matnga o'girolmayman \U0001F615 "
+            "Iltimos, yozib yuboring - darrov javob beraman."
+        )
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------- AI suhbat
 async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -621,7 +857,7 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     kirish = xabar_matni(msg)
-    if not kirish and not msg.photo:
+    if not kirish and not msg.photo and not msg.document:
         return
 
     biznesmi = update.business_message is not None
@@ -677,6 +913,32 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # boshqa narsa yozsa - taklifni saqlab qolamiz, suhbat davom etadi
 
+    # Kutilayotgan so'rovnoma tasdig'iga javob bo'lsa
+    kutilayotgan_soz = context.chat_data.get("kutilayotgan_sorovnoma")
+    if kutilayotgan_soz and amal_ruxsat:
+        soz = kirish.strip().lower()
+        if soz in TASDIQ_SOZLARI:
+            del context.chat_data["kutilayotgan_sorovnoma"]
+            if not NEWS_KANAL:
+                await msg.reply_text("NEWS_KANAL sozlanmagan, joylay olmayman.")
+                return
+            try:
+                await context.bot.send_poll(
+                    NEWS_KANAL,
+                    question=kutilayotgan_soz["savol"][:300],
+                    options=[v[:100] for v in kutilayotgan_soz["variantlar"][:10]],
+                    is_anonymous=True,
+                )
+                await msg.reply_text("✅ So'rovnoma kanalga joylandi!")
+            except Exception as e:
+                log.error("So'rovnoma joylashda xato: %s", e)
+                await msg.reply_text("So'rovnoma joylashda xatolik yuz berdi.")
+            return
+        if soz in BEKOR_SOZLARI:
+            del context.chat_data["kutilayotgan_sorovnoma"]
+            await msg.reply_text("Bekor qildim.")
+            return
+
     try:
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id,
@@ -687,9 +949,22 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     rasm_bloklari = await _rasm_kontenti(msg)
-    joriy_matn = kirish or "Bu rasmga izoh bering yoki nima ekanini ayting."
+    hujjat_bloklari, hujjat_matn = await _hujjat_kontenti(msg)
+
+    joriy_matn = kirish or ""
+    if hujjat_matn:
+        joriy_matn = (joriy_matn + "\n\n" + hujjat_matn).strip()
+    if not joriy_matn:
+        if rasm_bloklari:
+            joriy_matn = "Bu rasmga izoh bering yoki nima ekanini ayting."
+        elif hujjat_bloklari:
+            joriy_matn = "Bu hujjatni o'zbekchada qisqacha xulosalab bering."
+        else:
+            joriy_matn = "..."
+
+    media_bloklari = hujjat_bloklari + rasm_bloklari
     joriy_kontent = (
-        rasm_bloklari + [{"type": "text", "text": joriy_matn}] if rasm_bloklari else joriy_matn
+        media_bloklari + [{"type": "text", "text": joriy_matn}] if media_bloklari else joriy_matn
     )
 
     tarix = context.chat_data.setdefault("tarix", [])
@@ -715,11 +990,14 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post_yordam = ""
     if amal_ruxsat and NEWS_KANAL:
         toollar.append(POST_TAKLIF_TOOL)
+        toollar.append(SOROVNOMA_TAKLIF_TOOL)
         post_yordam = (
             "\n\nMUHIM: Agar Asadbek 'kanalimga yoz', 'buni postla', 'post qil', "
             "'kanalga joyla' kabi so'rov bersa - hech qachon post matnini oddiy "
             "javob sifatida yozib qo'ya qolma. Har doim post_taklif toolini "
-            "chaqir, hatto post yozish uchun avval web_search ishlatgan bo'lsang ham."
+            "chaqir, hatto post yozish uchun avval web_search ishlatgan bo'lsang ham. "
+            "Agar 'kanalga so'rovnoma qo'y', 'ovoz berish qo'shamiz' kabi so'rov "
+            "bersa - sorovnoma_taklif toolini chaqir."
         )
 
     import anthropic
@@ -743,6 +1021,8 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "savollarida qidiruv shart emas.\n\n"
                 "Senga rasm yuborilishi mumkin - uni ko'rasan, tahlil qil va "
                 "so'ralganini bajar (tasvirlash, matnini o'qish, izoh berish va h.k.).\n\n"
+                "Senga PDF yoki matnli hujjat ham yuborilishi mumkin - uni to'liq "
+                "o'qiysan. So'ralsa xulosala, savollarga javob ber yoki tahlil qil.\n\n"
                 "Agar xabar '[... dan forward qilingan post]' bilan boshlansa, bu "
                 "foydalanuvchi senga yuborgan post matni - sen uni to'liq ko'rayapsan. "
                 "'Ko'ra olmayman' dema! U bilan bemalol ishla: tahlil qil, qayta yoz, "
@@ -755,11 +1035,16 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         matnlar = [b.text for b in javob.content if getattr(b, "type", None) == "text"]
         asosiy_matn = "\n".join(matnlar).strip()
 
-        post_bloki = next(
-            (b for b in javob.content
-             if getattr(b, "type", None) == "tool_use" and b.name == "post_taklif"),
-            None,
-        )
+        def tool_bloki(nom):
+            return next(
+                (b for b in javob.content
+                 if getattr(b, "type", None) == "tool_use" and b.name == nom),
+                None,
+            )
+
+        post_bloki = tool_bloki("post_taklif")
+        sorovnoma_bloki = tool_bloki("sorovnoma_taklif")
+
         if post_bloki is not None:
             taklif_matn = (post_bloki.input.get("matn") or "").strip()
             vaqt_soz = (post_bloki.input.get("vaqt") or "").strip()
@@ -777,6 +1062,25 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"\U0001F4CB Taklif etilayotgan post:\n\n{taklif_matn}\n\n{vaqt_izoh}\n\n"
                 "Joylashni istasangiz \"ha\", bekor qilish uchun \"yo'q\" deb yozing."
             )
+        elif sorovnoma_bloki is not None:
+            savol = (sorovnoma_bloki.input.get("savol") or "").strip()
+            variantlar = [
+                str(v).strip() for v in (sorovnoma_bloki.input.get("variantlar") or [])
+                if str(v).strip()
+            ]
+            if savol and len(variantlar) >= 2:
+                context.chat_data["kutilayotgan_sorovnoma"] = {
+                    "savol": savol, "variantlar": variantlar,
+                }
+                variant_matn = "\n".join(f"  • {v}" for v in variantlar)
+                matn = (
+                    (asosiy_matn + "\n\n" if asosiy_matn else "") +
+                    f"\U0001F4CA Taklif etilayotgan so'rovnoma:\n\n"
+                    f"❓ {savol}\n{variant_matn}\n\n"
+                    "Joylashni istasangiz \"ha\", bekor qilish uchun \"yo'q\" deb yozing."
+                )
+            else:
+                matn = asosiy_matn or "So'rovnoma uchun savol va kamida 2 ta variant kerak."
         else:
             matn = asosiy_matn or "Hozir javob shakllantirolmadim, boshqacharoq so'rab ko'ring \U0001F615"
     except Exception as e:
@@ -785,7 +1089,13 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Hozir javob berolmayman, keyinroq yozing \U0001F615")
         return
 
-    tarix.append({"role": "user", "content": kirish or "[rasm yubordi]"})
+    if kirish:
+        tarix_belgi = kirish
+    elif msg.document:
+        tarix_belgi = "[hujjat yubordi]"
+    else:
+        tarix_belgi = "[rasm yubordi]"
+    tarix.append({"role": "user", "content": tarix_belgi})
     tarix.append({"role": "assistant", "content": matn})
     del tarix[:-10]
     await msg.reply_text(matn)
@@ -805,6 +1115,10 @@ EGA_BUYRUQLARI = UMUMIY_BUYRUQLAR + [
     BotCommand("kanal_ochir", "Kanalni kuzatuvdan olib tashlash"),
     BotCommand("kanallar", "Kuzatilayotgan kanallar"),
     BotCommand("post", "Kanalga qo'lda matn/rasm joylash"),
+    BotCommand("dayjest", "AI yangiliklar dayjestini hozir joylash"),
+    BotCommand("navbatga", "Postni navbatga qo'shish"),
+    BotCommand("navbat", "Post navbatini ko'rish"),
+    BotCommand("navbat_tozala", "Navbatni tozalash"),
 ]
 
 # ---------------------------------------------------------------- ishga tushirish
@@ -868,16 +1182,31 @@ def main():
     app.add_handler(CommandHandler("kanal_ochir", kanal_ochir))
     app.add_handler(CommandHandler("kanallar", kanallar_royxati))
     app.add_handler(CommandHandler("post", post_qil))
+    app.add_handler(CommandHandler("dayjest", dayjest_buyrug))
+    app.add_handler(CommandHandler("navbatga", navbatga_qosh))
+    app.add_handler(CommandHandler("navbat", navbat_korsat))
+    app.add_handler(CommandHandler("navbat_tozala", navbat_tozala))
     app.add_handler(MessageHandler(
-        ((filters.TEXT | filters.CAPTION | filters.FORWARDED | filters.PHOTO) & ~filters.COMMAND)
+        ((filters.TEXT | filters.CAPTION | filters.FORWARDED | filters.PHOTO
+          | filters.Document.ALL) & ~filters.COMMAND)
         & (filters.UpdateType.MESSAGE | filters.UpdateType.BUSINESS_MESSAGE),
         ai_javob,
+    ))
+    app.add_handler(MessageHandler(
+        (filters.VOICE | filters.AUDIO)
+        & (filters.UpdateType.MESSAGE | filters.UpdateType.BUSINESS_MESSAGE),
+        ovoz_javob,
     ))
 
     # Har kuni 07:00 (Toshkent vaqti) - Farg'ona ob-havosi
     app.job_queue.run_daily(kunlik_obhavo, time=dtime(7, 0, tzinfo=VAQT_ZONASI))
     # Har soatda - kanallarni tekshirish (birinchisi 1 daqiqadan keyin)
     app.job_queue.run_repeating(kanallarni_tekshir, interval=3600, first=60)
+    # Kuniga 3 mahal - AI yangiliklar dayjesti kanalga
+    for soat in (9, 14, 20):
+        app.job_queue.run_daily(ai_dayjest, time=dtime(soat, 0, tzinfo=VAQT_ZONASI))
+    # Har 4 soatda - navbatdan bitta post (kunduzi)
+    app.job_queue.run_repeating(navbatni_joyla, interval=4 * 3600, first=120)
 
     log.info("Bot ishga tushdi!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
