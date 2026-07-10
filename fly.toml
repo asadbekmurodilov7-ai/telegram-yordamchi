@@ -1,0 +1,10 @@
+app = "telegram-yordamchi-asadbek"
+primary_region = "fra"
+
+[build]
+
+[env]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
