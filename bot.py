@@ -350,8 +350,30 @@ def kanal_postlarini_olish(sahifa_html: str):
     return sorted(postlar)
 
 
+def _deduplikatsiya(postlar: list) -> list:
+    """Deyarli bir xil (biri ikkinchisining qismi bo'lgan) postlarni birlashtiradi."""
+    natija = []
+    for pid, matn, rasm in postlar:
+        takror = False
+        for i, (o_pid, o_matn, o_rasm) in enumerate(natija):
+            qisqa, uzun = (matn, o_matn) if len(matn) <= len(o_matn) else (o_matn, matn)
+            if qisqa and uzun and qisqa.strip() and qisqa.strip() in uzun:
+                # Qisqarog'ini tashlab, to'liqrog'ini (va rasmi bo'lsa - rasmini) saqlaymiz
+                natija[i] = (
+                    o_pid if len(o_matn) >= len(matn) else pid,
+                    uzun,
+                    o_rasm or rasm,
+                )
+                takror = True
+                break
+        if not takror:
+            natija.append((pid, matn, rasm))
+    return natija
+
+
 async def qiziqlarini_saralash(kanal: str, postlar: list) -> str:
     """AI orqali yangi postlardan qiziqlarini tanlab, qisqa xulosa qiladi."""
+    postlar = _deduplikatsiya(postlar)
     royxat = "\n\n".join(f"[Post {pid}]\n{matn[:800]}" for pid, matn, _ in postlar if matn)
     if not royxat:
         return ""
@@ -367,12 +389,26 @@ async def qiziqlarini_saralash(kanal: str, postlar: list) -> str:
         model="claude-haiku-4-5",
         max_tokens=800,
         system=(
-            "Sen Telegram kanallarini kuzatuvchi yordamchisan. Quyida kanaldagi yangi "
-            "postlar berilgan. Faqat chindan qiziqarli va foydali postlarni tanla va har "
-            "birini 1-2 jumlada o'zbek tilida xulosala. Reklama va ahamiyatsiz postlarni "
-            "tashlab yubor. Agar hech biri qiziq bo'lmasa, faqat 'YOQ' deb yoz.\n\n"
-            "Xulosalarni quruq/rasmiy botdek emas, balki quyidagi uslubdagi odam "
-            "o'zi yozgandek, uning ovozida yoz:\n"
+            "Sen Telegram kanali uchun yangiliklar dayjesti yozuvchisan. Natijang "
+            "to'g'ridan-to'g'ri ochiq kanalga PUBLIKATSIYA qilinadi - bu tahririy "
+            "sharh yoki tavsiya emas, balki oddiy yangiliklar xulosasi.\n\n"
+            "Quyida kanaldagi yangi postlar berilgan (har biri alohida [Post ID] "
+            "bilan belgilangan - bular bir-biriga aloqasiz mustaqil postlar, ularni "
+            "birlashtirib bitta voqeaga aylantirma). Faqat chindan qiziqarli va "
+            "foydali postlarni tanla, reklama/ahamiyatsizlarini tashlab yubor.\n\n"
+            "Har bir tanlangan post uchun FAQAT shu formatda yoz:\n"
+            "📌 [qisqa mavzu nomi]: [postda yozilgan faktning 1 jumlali xulosasi]\n\n"
+            "QATTIQ QOIDALAR:\n"
+            "1. Xulosa FAQAT postda aniq yozilgan faktga asoslansin - postda yo'q "
+            "narsani o'zingdan qo'shma (sabab, fon, taxmin, tarix va h.k.).\n"
+            "2. Postlarni BAHOLAMA, TANQID QILMA va TAVSIYA BERMA - 'bu ishonchli "
+            "emas', 'diqqatga arziydi', 'o'tkazib yuboring' kabi sharhlovchi "
+            "jumlalar yozma. Sen muharrir emassan, faqat xabarni etkazasan.\n"
+            "3. Agar hech biri qiziq bo'lmasa, faqat 'YOQ' deb yoz.\n"
+            "4. Boshqa hech qanday kirish so'zi, xulosa yoki izoh qo'shma - faqat "
+            "yuqoridagi formatdagi qatorlar bo'lsin.\n\n"
+            "So'z tanlovi/ohang uchun (mazmunga emas, faqat uslubga tegishli) "
+            "quyidagi kishining tabiiy so'zlashuvidan foydalan:\n"
             f"{uslub_matni}"
         ),
         messages=[{"role": "user", "content": f"Kanal: @{kanal}\n\n{royxat}"}],
