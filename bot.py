@@ -10,9 +10,11 @@ Funksiyalar:
                       va NEWS_KANAL'ga (rasmi bilan, bo'lsa) yuboradi
   - Qo'lda post       (/post) - o'z kanaliga matn yoki rasm joylashtirish
   - Kunlik ob-havo    - har kuni 07:00 da Farg'ona ob-havosi egaga yuboriladi
-  - AI suhbat         - yozgan odamlar bilan egasining uslubida suhbatlashadi,
-                      internetdan qidiruv qila oladi (web_search), yuborilgan
-                      rasmni ko'ra oladi (vision)
+  - AI suhbat         - EGA botga o'zi yozganda to'liq AI (web_search, vision,
+                      post yozish va h.k.) ishlaydi. Boshqa odamlar yozsa - 3
+                      bosqichli qat'iy qabulxona rejimi: 1) tanishuv (Nova'man,
+                      Asadbek band), 2) muammoni tushunib va'da berish, 3) keyingi
+                      savollarga qisqa javob, ortiqcha suhbat yo'q
   - AI orqali post    - ega suhbatda "kanalimga shu haqida yoz" desa, AI post
                       matnini tayyorlab tasdiq so'raydi, "ha" desa (yoki vaqt
                       aytilgan bo'lsa o'sha vaqtda) NEWS_KANAL'ga joylaydi
@@ -728,6 +730,108 @@ async def navbatni_joyla(context: ContextTypes.DEFAULT_TYPE):
         log.error("Navbatdagi postni joylashda xato: %s", e)
 
 
+# ---------------------------------------------------------------- qabulxona (boshqa odamlar uchun)
+async def qabulxona_javob(msg, context, kim: str, kirish: str):
+    """Asadbekdan boshqa odamlar yozganda - 3 bosqichli qat'iy qabulxonachi rejimi."""
+    bosqich = context.chat_data.get("qabul_bosqich", 0)
+
+    # 1-bosqich: birinchi murojaat - tanishuv (doim bir xil, AI shart emas)
+    if bosqich == 0:
+        context.chat_data["qabul_bosqich"] = 1
+        await msg.reply_text(
+            "Salom! \U0001F44B Asadbek hozir band. Men uning yordamchisi Nova'man. "
+            "Sizga qanday yordam kerak?"
+        )
+        return
+
+    if not kirish:
+        kirish = "(matnsiz xabar - rasm yoki fayl yubordi)"
+
+    if not ANTHROPIC_API_KEY:
+        await msg.reply_text(
+            "Tushundim, Asadbekka albatta yetkazib qo'yaman."
+            if bosqich == 1 else
+            "Aniq ayta olmayman, lekin Asadbek bo'shagach albatta sizga qaraydi."
+        )
+        if bosqich == 1:
+            context.chat_data["qabul_bosqich"] = 2
+        return
+
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    # 2-bosqich: muammosini/so'rovini aytdi - tushunganini bildirib, Asadbekka yetkazishni aytadi
+    if bosqich == 1:
+        context.chat_data["qabul_bosqich"] = 2
+        try:
+            javob = await client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=150,
+                system=(
+                    "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi "
+                    "kabi ishlaysan. Foydalanuvchi hozir o'z so'rovini/muammosini "
+                    "aytdi. Vazifang: uning aytganini 1 qisqa jumlada tushunganingni "
+                    "bildir (so'zma-so'z takrorlama, mazmunini o'zingcha qisqa qayta "
+                    "ayt), so'ng albatta shu ma'noda gap qo'sh: 'Asadbek band bo'lgani "
+                    "uchun hozir javob berolmayapti, lekin xabaringizni albatta "
+                    "yetkazib qo'yaman - u bo'shagach o'zi siz bilan bog'lanadi.' "
+                    "Boshqa hech narsa yozma - savol berma, suhbatni davom ettirma, "
+                    "his-tuyg'u bildirma. Faqat shu ikki narsa: tushunish + va'da."
+                ),
+                messages=[{"role": "user", "content": kirish}],
+            )
+            matn = "\n".join(
+                b.text for b in javob.content if getattr(b, "type", None) == "text"
+            ).strip()
+        except Exception as e:
+            log.error("Qabulxona AI xatosi: %s", e)
+            matn = ""
+        if not matn:
+            matn = (
+                "Tushundim. Asadbek band bo'lgani uchun hozir javob berolmayapti, "
+                "lekin xabaringizni albatta yetkazib qo'yaman - u bo'shagach o'zi "
+                "siz bilan bog'lanadi."
+            )
+        await msg.reply_text(matn)
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    ADMIN_CHAT_ID, f"\U0001F4E9 {kim} sizga yozdi:\n\n{kirish}"
+                )
+            except Exception:
+                pass
+        return
+
+    # 3-bosqich va undan keyin: keyingi savollarga (masalan "qachon keladi")
+    # faqat qisqa va aniq javob - ortiqcha suhbat yo'q
+    try:
+        javob = await client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=150,
+            system=(
+                "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi kabi "
+                "ishlaysan. Asadbek hozir band, sen uning o'rniga to'liq javob "
+                "berolmaysan. Foydalanuvchi savol berdi (masalan 'qachon keladi' "
+                "kabi) - shu savolga FAQAT 1 ta qisqa jumlada, samimiy va aniq "
+                "javob ber. Agar aniq javobing bo'lmasa (masalan qachon "
+                "bo'shashini bilmasang), 'Aniq vaqtni bilmayman, lekin bo'shagach "
+                "albatta sizga qaraydi' kabi javob ber. Suhbatni davom ettirma, "
+                "qo'shimcha savol bermа, ortiqcha gapirmа - faqat bitta qisqa "
+                "jumla yoz."
+            ),
+            messages=[{"role": "user", "content": kirish}],
+        )
+        matn = "\n".join(
+            b.text for b in javob.content if getattr(b, "type", None) == "text"
+        ).strip()
+    except Exception as e:
+        log.error("Qabulxona AI xatosi: %s", e)
+        matn = ""
+    await msg.reply_text(
+        matn or "Aniq ayta olmayman, lekin Asadbek bo'shagach albatta sizga qaraydi."
+    )
+
+
 def xabar_matni(msg) -> str:
     """Xabardan matnni oladi - forward, caption va reply kontekstini ham qo'shadi."""
     matn = msg.text or msg.caption or ""
@@ -904,11 +1008,16 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Kanalga post joylash/rejalashtirish faqat egasining o'z shaxsiy chatida
     amal_ruxsat = egami(update) and not biznesmi
 
+    # Asadbekdan boshqa odamlar yozsa - to'liq AI suhbat emas, qat'iy qabulxona rejimi
+    if not amal_ruxsat:
+        kim_qabul = update.effective_user.first_name if update.effective_user else "Mijoz"
+        await qabulxona_javob(msg, context, kim_qabul or "Mijoz", kirish)
+        return
+
     if not ANTHROPIC_API_KEY:
-        if not biznesmi:
-            await msg.reply_text(
-                "Hozir suhbatlasha olmayman (AI o'chiq). Buyruqlar uchun /yordam yozing."
-            )
+        await msg.reply_text(
+            "Hozir suhbatlasha olmayman (AI o'chiq). Buyruqlar uchun /yordam yozing."
+        )
         return
 
     # Kutilayotgan post tasdig'iga javob bo'lsa
