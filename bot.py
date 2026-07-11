@@ -24,10 +24,15 @@ Funksiyalar:
   - Post navbati      - /navbatga bilan post qo'shiladi, har 4 soatda kanalga
   - Hujjat xulosasi   - PDF yoki matnli fayl yuborilsa Claude o'qib xulosalaydi
 
+Ikki AI ishlatiladi (narx tejash uchun):
+  - Gemini (arzon)   - qabulxona suhbati (begona odamlar) + kanal postlarini xulosalash
+  - Anthropic Claude - kunlik dayjest va ega bilan asosiy suhbat (web-qidiruv, rasm, PDF)
+
 Muhit o'zgaruvchilari (environment variables):
   BOT_TOKEN          - BotFather bergan token (majburiy)
   ADMIN_CHAT_ID      - egasining chat raqami; /id buyrug'i bilan bilib olinadi
-  ANTHROPIC_API_KEY  - Claude API kaliti (AI suhbat va qiziq postlarni saralash uchun)
+  ANTHROPIC_API_KEY  - Claude API kaliti (web-qidiruv, dayjest, ega bilan suhbat)
+  GEMINI_API_KEY     - Gemini API kaliti (qabulxona + kanal xulosasi - arzon)
 """
 
 import os
@@ -55,6 +60,7 @@ log = logging.getLogger("bot")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0") or 0)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 DB_FILE = os.environ.get("DB_FILE", "bot.db")
 
 
@@ -123,6 +129,26 @@ def sozlama_qoy(kalit, qiymat):
 
 def egami(update: Update) -> bool:
     return ADMIN_CHAT_ID and update.effective_chat.id == ADMIN_CHAT_ID
+
+
+# ---------------------------------------------------------------- Gemini (arzon AI)
+async def gemini_javob(system: str, user_text: str, max_tokens: int = 600) -> str:
+    """Gemini 2.5 Flash orqali javob oladi (qabulxona va kanal xulosasi uchun - arzon)."""
+    if not GEMINI_API_KEY:
+        return ""
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    resp = await client.aio.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=user_text,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    return (resp.text or "").strip()
 
 # ---------------------------------------------------------------- /start va /yordam
 YORDAM_MATNI = (
@@ -379,44 +405,41 @@ async def qiziqlarini_saralash(kanal: str, postlar: list) -> str:
     royxat = "\n\n".join(f"[Post {pid}]\n{matn[:800]}" for pid, matn, _ in postlar if matn)
     if not royxat:
         return ""
-    if not ANTHROPIC_API_KEY:
+    if not GEMINI_API_KEY:
         # AI bo'lmasa - hammasini qisqartirib yuboramiz
         return "\n\n".join(f"• {matn[:300]}" for _, matn, _ in postlar if matn)
 
     uslub_matni = sozlama_ol("uslub", STANDART_USLUB)
-
-    import anthropic
-    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    javob = await client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=800,
-        system=(
-            "Sen Telegram kanali uchun yangiliklar dayjesti yozuvchisan. Natijang "
-            "to'g'ridan-to'g'ri ochiq kanalga PUBLIKATSIYA qilinadi - bu tahririy "
-            "sharh yoki tavsiya emas, balki oddiy yangiliklar xulosasi.\n\n"
-            "Quyida kanaldagi yangi postlar berilgan (har biri alohida [Post ID] "
-            "bilan belgilangan - bular bir-biriga aloqasiz mustaqil postlar, ularni "
-            "birlashtirib bitta voqeaga aylantirma). Faqat chindan qiziqarli va "
-            "foydali postlarni tanla, reklama/ahamiyatsizlarini tashlab yubor.\n\n"
-            "Har bir tanlangan post uchun FAQAT shu formatda yoz:\n"
-            "📌 [qisqa mavzu nomi]: [postda yozilgan faktning 1 jumlali xulosasi]\n\n"
-            "QATTIQ QOIDALAR:\n"
-            "1. Xulosa FAQAT postda aniq yozilgan faktga asoslansin - postda yo'q "
-            "narsani o'zingdan qo'shma (sabab, fon, taxmin, tarix va h.k.).\n"
-            "2. Postlarni BAHOLAMA, TANQID QILMA va TAVSIYA BERMA - 'bu ishonchli "
-            "emas', 'diqqatga arziydi', 'o'tkazib yuboring' kabi sharhlovchi "
-            "jumlalar yozma. Sen muharrir emassan, faqat xabarni etkazasan.\n"
-            "3. Agar hech biri qiziq bo'lmasa, faqat 'YOQ' deb yoz.\n"
-            "4. Boshqa hech qanday kirish so'zi, xulosa yoki izoh qo'shma - faqat "
-            "yuqoridagi formatdagi qatorlar bo'lsin.\n\n"
-            "So'z tanlovi/ohang uchun (mazmunga emas, faqat uslubga tegishli) "
-            "quyidagi kishining tabiiy so'zlashuvidan foydalan:\n"
-            f"{uslub_matni}"
-        ),
-        messages=[{"role": "user", "content": f"Kanal: @{kanal}\n\n{royxat}"}],
+    system = (
+        "Sen Telegram kanali uchun yangiliklar dayjesti yozuvchisan. Natijang "
+        "to'g'ridan-to'g'ri ochiq kanalga PUBLIKATSIYA qilinadi - bu tahririy "
+        "sharh yoki tavsiya emas, balki oddiy yangiliklar xulosasi.\n\n"
+        "Quyida kanaldagi yangi postlar berilgan (har biri alohida [Post ID] "
+        "bilan belgilangan - bular bir-biriga aloqasiz mustaqil postlar, ularni "
+        "birlashtirib bitta voqeaga aylantirma). Faqat chindan qiziqarli va "
+        "foydali postlarni tanla, reklama/ahamiyatsizlarini tashlab yubor.\n\n"
+        "Har bir tanlangan post uchun FAQAT shu formatda yoz:\n"
+        "📌 [qisqa mavzu nomi]: [postda yozilgan faktning 1 jumlali xulosasi]\n\n"
+        "QATTIQ QOIDALAR:\n"
+        "1. Xulosa FAQAT postda aniq yozilgan faktga asoslansin - postda yo'q "
+        "narsani o'zingdan qo'shma (sabab, fon, taxmin, tarix va h.k.).\n"
+        "2. Postlarni BAHOLAMA, TANQID QILMA va TAVSIYA BERMA - 'bu ishonchli "
+        "emas', 'diqqatga arziydi', 'o'tkazib yuboring' kabi sharhlovchi "
+        "jumlalar yozma. Sen muharrir emassan, faqat xabarni etkazasan.\n"
+        "3. Agar hech biri qiziq bo'lmasa, faqat 'YOQ' deb yoz.\n"
+        "4. Boshqa hech qanday kirish so'zi, xulosa yoki izoh qo'shma - faqat "
+        "yuqoridagi formatdagi qatorlar bo'lsin.\n\n"
+        "So'z tanlovi/ohang uchun (mazmunga emas, faqat uslubga tegishli) "
+        "quyidagi kishining tabiiy so'zlashuvidan foydalan:\n"
+        f"{uslub_matni}"
     )
-    natija = javob.content[0].text.strip()
-    return "" if natija.upper().startswith("YOQ") else natija
+    try:
+        natija = await gemini_javob(system, f"Kanal: @{kanal}\n\n{royxat}", max_tokens=800)
+    except Exception as e:
+        log.error("Kanal xulosasi (Gemini) xatosi: %s", e)
+        return ""
+    natija = natija.strip()
+    return "" if not natija or natija.upper().startswith("YOQ") else natija
 
 
 async def _postni_yubor(bot, chat_id, matn: str, rasm_url: str | None = None):
@@ -747,7 +770,7 @@ async def qabulxona_javob(msg, context, kim: str, kirish: str):
     if not kirish:
         kirish = "(matnsiz xabar - rasm yoki fayl yubordi)"
 
-    if not ANTHROPIC_API_KEY:
+    if not GEMINI_API_KEY:
         await msg.reply_text(
             "Tushundim, Asadbekka albatta yetkazib qo'yaman."
             if bosqich == 1 else
@@ -757,34 +780,24 @@ async def qabulxona_javob(msg, context, kim: str, kirish: str):
             context.chat_data["qabul_bosqich"] = 2
         return
 
-    import anthropic
-    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-
     # 2-bosqich: muammosini/so'rovini aytdi - tushunganini bildirib, Asadbekka yetkazishni aytadi
     if bosqich == 1:
         context.chat_data["qabul_bosqich"] = 2
+        system = (
+            "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi "
+            "kabi ishlaysan. Foydalanuvchi hozir o'z so'rovini/muammosini "
+            "aytdi. Vazifang: uning aytganini 1 qisqa jumlada tushunganingni "
+            "bildir (so'zma-so'z takrorlama, mazmunini o'zingcha qisqa qayta "
+            "ayt), so'ng albatta shu ma'noda gap qo'sh: 'Asadbek band bo'lgani "
+            "uchun hozir javob berolmayapti, lekin xabaringizni albatta "
+            "yetkazib qo'yaman - u bo'shagach o'zi siz bilan bog'lanadi.' "
+            "Boshqa hech narsa yozma - savol berma, suhbatni davom ettirma, "
+            "his-tuyg'u bildirma. Faqat shu ikki narsa: tushunish + va'da."
+        )
         try:
-            javob = await client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=150,
-                system=(
-                    "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi "
-                    "kabi ishlaysan. Foydalanuvchi hozir o'z so'rovini/muammosini "
-                    "aytdi. Vazifang: uning aytganini 1 qisqa jumlada tushunganingni "
-                    "bildir (so'zma-so'z takrorlama, mazmunini o'zingcha qisqa qayta "
-                    "ayt), so'ng albatta shu ma'noda gap qo'sh: 'Asadbek band bo'lgani "
-                    "uchun hozir javob berolmayapti, lekin xabaringizni albatta "
-                    "yetkazib qo'yaman - u bo'shagach o'zi siz bilan bog'lanadi.' "
-                    "Boshqa hech narsa yozma - savol berma, suhbatni davom ettirma, "
-                    "his-tuyg'u bildirma. Faqat shu ikki narsa: tushunish + va'da."
-                ),
-                messages=[{"role": "user", "content": kirish}],
-            )
-            matn = "\n".join(
-                b.text for b in javob.content if getattr(b, "type", None) == "text"
-            ).strip()
+            matn = await gemini_javob(system, kirish, max_tokens=200)
         except Exception as e:
-            log.error("Qabulxona AI xatosi: %s", e)
+            log.error("Qabulxona (Gemini) xatosi: %s", e)
             matn = ""
         if not matn:
             matn = (
@@ -804,28 +817,20 @@ async def qabulxona_javob(msg, context, kim: str, kirish: str):
 
     # 3-bosqich va undan keyin: keyingi savollarga (masalan "qachon keladi")
     # faqat qisqa va aniq javob - ortiqcha suhbat yo'q
+    system = (
+        "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi kabi "
+        "ishlaysan. Asadbek hozir band, sen uning o'rniga to'liq javob "
+        "berolmaysan. Foydalanuvchi savol berdi (masalan 'qachon keladi' "
+        "kabi) - shu savolga FAQAT 1 ta qisqa jumlada, samimiy va aniq "
+        "javob ber. Agar aniq javobing bo'lmasa (masalan qachon "
+        "bo'shashini bilmasang), 'Aniq vaqtni bilmayman, lekin bo'shagach "
+        "albatta sizga qaraydi' kabi javob ber. Suhbatni davom ettirma, "
+        "qo'shimcha savol berma, ortiqcha gapirma - faqat bitta qisqa jumla yoz."
+    )
     try:
-        javob = await client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=150,
-            system=(
-                "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi kabi "
-                "ishlaysan. Asadbek hozir band, sen uning o'rniga to'liq javob "
-                "berolmaysan. Foydalanuvchi savol berdi (masalan 'qachon keladi' "
-                "kabi) - shu savolga FAQAT 1 ta qisqa jumlada, samimiy va aniq "
-                "javob ber. Agar aniq javobing bo'lmasa (masalan qachon "
-                "bo'shashini bilmasang), 'Aniq vaqtni bilmayman, lekin bo'shagach "
-                "albatta sizga qaraydi' kabi javob ber. Suhbatni davom ettirma, "
-                "qo'shimcha savol bermа, ortiqcha gapirmа - faqat bitta qisqa "
-                "jumla yoz."
-            ),
-            messages=[{"role": "user", "content": kirish}],
-        )
-        matn = "\n".join(
-            b.text for b in javob.content if getattr(b, "type", None) == "text"
-        ).strip()
+        matn = await gemini_javob(system, kirish, max_tokens=200)
     except Exception as e:
-        log.error("Qabulxona AI xatosi: %s", e)
+        log.error("Qabulxona (Gemini) xatosi: %s", e)
         matn = ""
     await msg.reply_text(
         matn or "Aniq ayta olmayman, lekin Asadbek bo'shagach albatta sizga qaraydi."
