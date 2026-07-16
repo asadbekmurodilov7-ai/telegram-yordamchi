@@ -24,8 +24,6 @@ Funksiyalar:
                       topib egadan tasdiq so'raydi, "ha" desa kanalga joylaydi
                       (/dayjest bilan qo'lda ham chaqirsa bo'ladi)
   - So'rovnoma        - suhbatda "kanalga so'rovnoma qo'y" desa poll joylaydi
-  - Post navbati      - /navbatga bilan matn/rasm qo'shiladi, har 4 soatda navbatdan
-                      bittasi uchun egadan tasdiq so'raydi
   - Hujjat xulosasi   - PDF yoki matnli fayl yuborilsa AI o'qib xulosalaydi
 
 Yagona AI - Gemini (arzon): qabulxona suhbati, kanal postlarini xulosalash, AI
@@ -107,15 +105,10 @@ def db():
         "CREATE TABLE IF NOT EXISTS vaqtli_postlar ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, matn TEXT, vaqt TEXT, rasm TEXT)"
     )
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS navbat ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, matn TEXT, qoshilgan TEXT, rasm TEXT)"
-    )
-    for jadval in ("vaqtli_postlar", "navbat"):
-        try:
-            conn.execute(f"ALTER TABLE {jadval} ADD COLUMN rasm TEXT")
-        except sqlite3.OperationalError:
-            pass
+    try:
+        conn.execute("ALTER TABLE vaqtli_postlar ADD COLUMN rasm TEXT")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -197,12 +190,10 @@ EGA_YORDAMI = (
     "• /kanal_ochir kanal_nomi - kuzatuvdan olib tashlash\n"
     "• /kanallar - kuzatilayotgan kanallar\n"
     "• /post matn - o'z kanalingizga qo'lda joylashtirish (rasmli xabarga\n"
-    "  javob qilib ham ishlatsa bo'ladi)\n"
-    "• /navbatga matn - post navbatiga qo'shish (rasmli xabarga javob qilib ham)\n"
-    "• /navbat, /navbat_tozala - navbatni ko'rish/tozalash\n\n"
+    "  javob qilib ham ishlatsa bo'ladi)\n\n"
     "Kanalga avtomatik joylanadigan har qanday post (kanal kuzatuvchi dayjesti, "
-    "AI dayjest, navbatdagi post) oldin sizdan tasdiq so'raydi - \"ha\" yoki "
-    "\"yo'q\" deb javob bering.\n"
+    "AI dayjest) oldin sizdan tasdiq so'raydi - \"ha\" yoki \"yo'q\" deb javob "
+    "bering.\n"
     "Har kuni 07:00 da Farg'ona ob-havosini yuboraman."
 )
 
@@ -691,101 +682,6 @@ async def post_qil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {NEWS_KANAL} ga joylandi!")
 
 
-# ---------------------------------------------------------------- post navbati
-async def navbatga_qosh(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Postni navbatga qo'shadi - bot uni kun davomida avtomatik joylaydi."""
-    if not egami(update):
-        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
-        return
-    qoshimcha = " ".join(context.args) if context.args else ""
-    javob_uchun = update.message.reply_to_message
-    rasm = javob_uchun.photo[-1].file_id if javob_uchun and javob_uchun.photo else None
-    matn = qoshimcha
-    if not matn and javob_uchun:
-        matn = javob_uchun.text or javob_uchun.caption or ""
-    if not matn.strip():
-        await update.message.reply_text(
-            "Navbatga qo'shish uchun:\n/navbatga Post matni\n"
-            "yoki matnli/rasmli xabarga javob qilib /navbatga deb yozing\n"
-            "(reply + /navbatga izoh - izoh caption o'rnini bosadi)."
-        )
-        return
-    conn = db()
-    conn.execute(
-        "INSERT INTO navbat (matn, qoshilgan, rasm) VALUES (?, ?, ?)",
-        (matn.strip(), datetime.now(VAQT_ZONASI).isoformat(), rasm),
-    )
-    soni = conn.execute("SELECT COUNT(*) FROM navbat").fetchone()[0]
-    conn.commit()
-    conn.close()
-    rasm_izoh = " \U0001F5BC" if rasm else ""
-    await update.message.reply_text(
-        f"✅ Navbatga qo'shildi{rasm_izoh} (navbatda {soni} ta post). "
-        "Kunduzi har 4 soatda bittadan avtomatik joylayman."
-    )
-
-
-async def navbat_korsat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Navbatdagi postlar ro'yxatini ko'rsatadi."""
-    if not egami(update):
-        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
-        return
-    conn = db()
-    qatorlar = conn.execute("SELECT id, matn, rasm FROM navbat ORDER BY id").fetchall()
-    conn.close()
-    if not qatorlar:
-        await update.message.reply_text(
-            "Navbat bo'sh. /navbatga bilan post qo'shing.\n"
-            "Tozalash uchun: /navbat_tozala"
-        )
-        return
-    javob = f"\U0001F4CB Navbatda {len(qatorlar)} ta post:\n\n"
-    for i, (pid, matn, rasm) in enumerate(qatorlar, 1):
-        belgi = " \U0001F5BC" if rasm else ""
-        javob += f"{i}. {matn[:80]}{'...' if len(matn) > 80 else ''}{belgi}\n"
-    javob += "\nTozalash uchun: /navbat_tozala"
-    await update.message.reply_text(javob)
-
-
-async def navbat_tozala(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Navbatni to'liq tozalaydi."""
-    if not egami(update):
-        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
-        return
-    conn = db()
-    conn.execute("DELETE FROM navbat")
-    conn.commit()
-    conn.close()
-    await update.message.reply_text("\U0001F5D1 Navbat tozalandi.")
-
-
-async def navbatni_joyla(context: ContextTypes.DEFAULT_TYPE):
-    """Kunduzi har 4 soatda navbatdan bitta postni tasdiq uchun egaga yuboradi."""
-    if not NEWS_KANAL or not ADMIN_CHAT_ID:
-        return
-    soat = datetime.now(VAQT_ZONASI).hour
-    if soat < 8 or soat >= 23:   # kechasi joylamaymiz
-        return
-    conn = db()
-    qator = conn.execute("SELECT id, matn, rasm FROM navbat ORDER BY id LIMIT 1").fetchone()
-    conn.close()
-    if not qator:
-        return
-    pid, matn, rasm = qator
-    context.application.chat_data[ADMIN_CHAT_ID]["kutilayotgan_avto_post"] = {
-        "turi": "navbat", "matn": matn, "rasm": rasm, "navbat_id": pid,
-    }
-    try:
-        await _postni_yubor(
-            context.bot, ADMIN_CHAT_ID,
-            f"\U0001F4E4 Navbatdagi post kanalga joylanishga tayyor:\n\n{matn}\n\n"
-            "Joylashni istaysizmi? \"ha\" yoki \"yo'q\" deb yozing.",
-            rasm,
-        )
-    except Exception as e:
-        log.error("Navbatdagi post uchun tasdiq so'rashda xato: %s", e)
-
-
 # ---------------------------------------------------------------- qabulxona (boshqa odamlar uchun)
 async def qabulxona_javob(msg, context, kim: str, kirish: str):
     """Asadbekdan boshqa odamlar yozganda - 3 bosqichli qat'iy qabulxonachi rejimi."""
@@ -1139,7 +1035,7 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Bekor qildim.")
             return
 
-    # Avtomatik taklif qilingan post (kanal dayjesti/AI dayjest/navbat) tasdig'iga javob bo'lsa
+    # Avtomatik taklif qilingan post (kanal dayjesti/AI dayjest) tasdig'iga javob bo'lsa
     kutilayotgan_avto = context.chat_data.get("kutilayotgan_avto_post")
     if kutilayotgan_avto and amal_ruxsat:
         soz = kirish.strip().lower()
@@ -1153,13 +1049,6 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.bot, NEWS_KANAL,
                     kutilayotgan_avto["matn"], kutilayotgan_avto.get("rasm"),
                 )
-                if kutilayotgan_avto["turi"] == "navbat" and kutilayotgan_avto.get("navbat_id"):
-                    conn = db()
-                    conn.execute(
-                        "DELETE FROM navbat WHERE id = ?", (kutilayotgan_avto["navbat_id"],)
-                    )
-                    conn.commit()
-                    conn.close()
                 if kutilayotgan_avto["turi"] == "ai_dayjest":
                     oldingi = sozlama_ol("dayjest_xotira", "")
                     yangi_xotira = (kutilayotgan_avto["matn"][:700] + "\n---\n" + oldingi)[:2500]
@@ -1171,13 +1060,6 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if soz in BEKOR_SOZLARI:
             del context.chat_data["kutilayotgan_avto_post"]
-            if kutilayotgan_avto["turi"] == "navbat" and kutilayotgan_avto.get("navbat_id"):
-                conn = db()
-                conn.execute(
-                    "DELETE FROM navbat WHERE id = ?", (kutilayotgan_avto["navbat_id"],)
-                )
-                conn.commit()
-                conn.close()
             await msg.reply_text("Bekor qildim.")
             return
 
@@ -1389,9 +1271,6 @@ EGA_BUYRUQLARI = UMUMIY_BUYRUQLAR + [
     BotCommand("kanallar", "Kuzatilayotgan kanallar"),
     BotCommand("post", "Kanalga qo'lda matn/rasm joylash"),
     BotCommand("dayjest", "AI yangiliklar dayjestini hozir joylash"),
-    BotCommand("navbatga", "Postni navbatga qo'shish"),
-    BotCommand("navbat", "Post navbatini ko'rish"),
-    BotCommand("navbat_tozala", "Navbatni tozalash"),
 ]
 
 # ---------------------------------------------------------------- ishga tushirish
@@ -1458,9 +1337,6 @@ def main():
     app.add_handler(CommandHandler("kanallar", kanallar_royxati))
     app.add_handler(CommandHandler("post", post_qil))
     app.add_handler(CommandHandler("dayjest", dayjest_buyrug))
-    app.add_handler(CommandHandler("navbatga", navbatga_qosh))
-    app.add_handler(CommandHandler("navbat", navbat_korsat))
-    app.add_handler(CommandHandler("navbat_tozala", navbat_tozala))
     app.add_handler(MessageHandler(
         ((filters.TEXT | filters.CAPTION | filters.FORWARDED | filters.PHOTO
           | filters.Document.ALL) & ~filters.COMMAND)
@@ -1480,8 +1356,6 @@ def main():
     # Kuniga 3 mahal - AI yangiliklar dayjesti kanalga
     for soat in (9, 14, 20):
         app.job_queue.run_daily(ai_dayjest, time=dtime(soat, 0, tzinfo=VAQT_ZONASI))
-    # Har 4 soatda - navbatdan bitta post (kunduzi)
-    app.job_queue.run_repeating(navbatni_joyla, interval=4 * 3600, first=120)
 
     log.info("Bot ishga tushdi!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
