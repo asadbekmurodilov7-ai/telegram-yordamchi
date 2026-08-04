@@ -44,6 +44,31 @@ def _segment_boshi(info: dict, klip: int) -> float:
     return float(boshi)
 
 
+def _qidiruv_natijalari(yt_dlp, base_opts: dict, nom: str, soni: int = 6) -> list:
+    """Qo'shiq nomi bo'yicha YouTube'dan bir nechta nomzodni qaytaradi (yuklamasdan).
+
+    Avval oddiy qidiruv, natija bo'lmasa 'audio' qo'shib qayta uriniladi — Uzbek
+    ijrochilar (masalan 'Jahongir Otajonov') ko'pincha shunda topiladi.
+    """
+    search_opts = {
+        **base_opts,
+        "default_search": f"ytsearch{soni}",
+        "skip_download": True,
+        "extract_flat": "in_playlist",
+    }
+    for sorov in (nom, f"{nom} audio", f"{nom} qo'shiq"):
+        try:
+            with yt_dlp.YoutubeDL(search_opts) as y:
+                res = y.extract_info(sorov, download=False)
+        except Exception as e:  # qidiruvning o'zi uzilsa — keyingi so'rovga o'tamiz
+            log.warning("Qidiruv xatosi ('%s'): %s", sorov, e)
+            continue
+        entries = [e for e in (res.get("entries") or [res]) if e]
+        if entries:
+            return entries
+    return []
+
+
 def musiqali_video(nom: str, rasm_bytes: bytes | None = None,
                    matn: str | None = None, klip: int = 25):
     """Qo'shiqni topib, eng rekli qismidan rasm ustiga qo'yilgan video yasaydi.
@@ -56,27 +81,58 @@ def musiqali_video(nom: str, rasm_bytes: bytes | None = None,
 
     tmp = tempfile.mkdtemp(prefix="story_musiqa_")
     try:
-        opts = {
+        base_opts = {
             "quiet": True, "no_warnings": True, "noplaylist": True,
-            "default_search": "ytsearch1", "format": "bestaudio/best",
-            "outtmpl": os.path.join(tmp, "audio.%(ext)s"),
+            "geo_bypass": True,
         }
         if os.path.exists(COOKIE_FAYL):
-            opts["cookiefile"] = COOKIE_FAYL
+            base_opts["cookiefile"] = COOKIE_FAYL
 
-        with yt_dlp.YoutubeDL(opts) as y:
-            info = y.extract_info(nom, download=True)
-            if "entries" in info:
-                info = info["entries"][0]
-            audio_yol = y.prepare_filename(info)
+        # 1) Bir nechta nomzodni topamiz (yuklamasdan)
+        nomzodlar = _qidiruv_natijalari(yt_dlp, base_opts, nom)
+        if not nomzodlar:
+            raise RuntimeError(
+                f"'{nom}' bo'yicha YouTube'dan hech narsa topilmadi. "
+                "Qo'shiq nomini ijrochi bilan birga aniqroq yozib ko'ring."
+            )
 
-        if not os.path.exists(audio_yol):
-            # ba'zida kengaytma farq qiladi — papkadagi audio faylni topamiz
-            fayllar = [os.path.join(tmp, f) for f in os.listdir(tmp)
-                       if f.startswith("audio.")]
-            if not fayllar:
-                raise RuntimeError("Audio yuklab olinmadi.")
-            audio_yol = fayllar[0]
+        # 2) Nomzodlarni navbat bilan yuklab ko'ramiz — birinchi ishlaganida to'xtaymiz
+        dl_opts = {
+            **base_opts, "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmp, "audio.%(ext)s"),
+        }
+        info, audio_yol, oxirgi_xato = None, None, None
+        for nomzod in nomzodlar[:5]:
+            url = (nomzod.get("webpage_url") or nomzod.get("url")
+                   or nomzod.get("id"))
+            if not url:
+                continue
+            try:
+                for f in os.listdir(tmp):  # oldingi urinish qoldig'ini tozalaymiz
+                    if f.startswith("audio."):
+                        os.remove(os.path.join(tmp, f))
+                with yt_dlp.YoutubeDL(dl_opts) as y:
+                    info = y.extract_info(url, download=True)
+                    if "entries" in info:
+                        info = info["entries"][0]
+                    audio_yol = y.prepare_filename(info)
+                if not os.path.exists(audio_yol):
+                    fayllar = [os.path.join(tmp, f) for f in os.listdir(tmp)
+                               if f.startswith("audio.")]
+                    audio_yol = fayllar[0] if fayllar else None
+                if audio_yol and os.path.exists(audio_yol):
+                    break
+            except Exception as e:
+                oxirgi_xato = e
+                log.warning("Nomzodni yuklab bo'lmadi (%s): %s", url, e)
+                info, audio_yol = None, None
+                continue
+
+        if not info or not audio_yol or not os.path.exists(audio_yol):
+            raise RuntimeError(
+                f"'{nom}' topildi, lekin audiosini yuklab bo'lmadi"
+                + (f": {oxirgi_xato}" if oxirgi_xato else ".")
+            )
 
         sarlavha = info.get("title") or nom
         boshi = _segment_boshi(info, klip)

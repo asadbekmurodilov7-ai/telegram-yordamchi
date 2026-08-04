@@ -160,7 +160,7 @@ def _tasdiq_klaviatura(tur: str) -> InlineKeyboardMarkup:
     """Postni tasdiqlash + qaysi kanalga joylash tugmalari.
 
     tur: 'post' | 'sorov' | 'avto' — qaysi kutilayotgan taklif ekanini bildiradi.
-    callback_data: 'tasdiq:<tur>:<k1|k2|no>'
+    callback_data: 'tasdiq:<tur>:<k1|k2|ikki|no>'
     """
     kanal_qatori = []
     if NEWS_KANAL:
@@ -174,21 +174,35 @@ def _tasdiq_klaviatura(tur: str) -> InlineKeyboardMarkup:
     qatorlar = []
     if kanal_qatori:
         qatorlar.append(kanal_qatori)
+    # Ikkala kanal ham sozlangan bo'lsa — bittada har ikkalasiga joylash tugmasi
+    if NEWS_KANAL and KANAL2:
+        qatorlar.append([InlineKeyboardButton(
+            "\U0001F4E2\U0001F4F0 Ikkala kanalga", callback_data=f"tasdiq:{tur}:ikki"
+        )])
     qatorlar.append([InlineKeyboardButton("❌ Bekor", callback_data=f"tasdiq:{tur}:no")])
     return InlineKeyboardMarkup(qatorlar)
 
 
-def _tanlangan_kanal(kod: str):
-    """'k1' -> NEWS_KANAL, 'k2' -> KANAL2."""
-    return NEWS_KANAL if kod == "k1" else KANAL2 if kod == "k2" else None
+def _tanlangan_kanallar(kod: str) -> list:
+    """Tanlangan kod bo'yicha kanal(lar) ro'yxatini qaytaradi.
+
+    'k1' -> [NEWS_KANAL], 'k2' -> [KANAL2], 'ikki' -> ikkalasi ham.
+    """
+    if kod == "k1":
+        return [NEWS_KANAL] if NEWS_KANAL else []
+    if kod == "k2":
+        return [KANAL2] if KANAL2 else []
+    if kod == "ikki":
+        return [k for k in (NEWS_KANAL, KANAL2) if k]
+    return []
 
 
 # Ega (Asadbek) uchun doimiy menyu tugmalari — eng muhim buyruqlar bir bosishda
+# ("Story" — matnli/rasm istorya va musiqali istoryani birlashtirgan bitta tugma)
 EGA_MENYU = ReplyKeyboardMarkup(
     [
-        ["\U0001F4DD Post yozish", "\U0001F4F8 Istorya"],
-        ["\U0001F3B5 Musiqali story", "\U0001F4F0 AI dayjest"],
-        ["\U0001F9E0 Bilim", "\U0001F324 Ob-havo"],
+        ["\U0001F4DD Post yozish", "\U0001F4F8 Story"],
+        ["\U0001F4F0 AI dayjest", "\U0001F9E0 Bilim"],
         ["\U0001F4B1 Valyuta", "\U000023F0 Eslatmalar"],
         ["\U0001F4CB Kanallar", "\U00002139 Yordam"],
     ],
@@ -197,10 +211,39 @@ EGA_MENYU = ReplyKeyboardMarkup(
 
 # Menyu tugmalari matni (ai_javob'da oddiy suhbatdan ajratish uchun)
 MENYU_TUGMALARI = {
-    "\U0001F4DD Post yozish", "\U0001F4F8 Istorya", "\U0001F3B5 Musiqali story",
-    "\U0001F4F0 AI dayjest", "\U0001F9E0 Bilim", "\U0001F324 Ob-havo",
-    "\U0001F4B1 Valyuta", "\U000023F0 Eslatmalar", "\U0001F4CB Kanallar",
-    "\U00002139 Yordam",
+    "\U0001F4DD Post yozish", "\U0001F4F8 Story", "\U0001F4F0 AI dayjest",
+    "\U0001F9E0 Bilim", "\U0001F4B1 Valyuta", "\U000023F0 Eslatmalar",
+    "\U0001F4CB Kanallar", "\U00002139 Yordam",
+}
+
+# Menyu tugmasi bosilganda ko'rsatiladigan tegishli buyruq(lar) yordami —
+# har bir bo'lim uchun mos /buyruq va uni ishlatish tartibi
+MENYU_YORDAMI = {
+    "\U0001F4DD Post yozish": (
+        "\U0001F4A1 Buyruq: /post <matn> — kanalga qo'lda joylash "
+        "(rasmli/matnli xabarga reply qilib ham). Yoki suhbatda "
+        "\"kanalimga shu haqda yoz\" deб yozing."
+    ),
+    "\U0001F4F8 Story": (
+        "\U0001F4A1 Buyruqlar: /story <matn> yoki rasm/videoga reply qilib /story — "
+        "profilga istorya. /musiqa <qo'shiq nomi> — musiqali istorya."
+    ),
+    "\U0001F4F0 AI dayjest": (
+        "\U0001F4A1 Buyruq: /dayjest — AI yangiliklar dayjestini hozir tayyorlab kanalga joylash."
+    ),
+    "\U0001F9E0 Bilim": (
+        "\U0001F4A1 Buyruq: /bilim <matn> — Nova mijozlarga javob berishda ishlatadigan "
+        "ma'lumot (xizmat/narx/FAQ). /bilim (matnsiz) — hozirgisini ko'rsatadi."
+    ),
+    "\U0001F4B1 Valyuta": "\U0001F4A1 Buyruq: /valyuta — Markaziy bank kurslari.",
+    "\U000023F0 Eslatmalar": (
+        "\U0001F4A1 Buyruqlar: /eslatma 30d Non olish (yoki 2soat / 18:30) — eslatma qo'shish. "
+        "/eslatmalar — ro'yxat."
+    ),
+    "\U0001F4CB Kanallar": (
+        "\U0001F4A1 Buyruqlar: /kanal <nomi> — kuzatuvga qo'shish, "
+        "/kanal_ochir <nomi> — olib tashlash, /kanallar — ro'yxat."
+    ),
 }
 
 
@@ -261,16 +304,21 @@ EGA_YORDAMI = (
     "• /kanallar - kuzatilayotgan kanallar\n"
     "• /post matn - o'z kanalingizga qo'lda joylashtirish (rasmli xabarga\n"
     "  javob qilib ham ishlatsa bo'ladi)\n"
+    "• /dayjest - AI yangiliklar dayjestini hozir tayyorlab joylash\n"
     "• /story - profilingizga istorya qo'yish (rasm/videoga reply, yoki /story matn)\n"
+    "• /musiqa qo'shiq_nomi - musiqali istorya (eng rekli qismidan)\n"
     "• /bilim matn - Nova mijozlarga javob berishda ishlatadigan ma'lumot\n"
     "  (xizmatlar/narx/FAQ). /bilim (matnsiz) - hozirgisini ko'rsatadi\n\n"
+    "\U0001F4F1 Pastdagi menyu tugmalari orqali ham hammasini bir bosishda "
+    "ochasiz. \"\U0001F4F8 Story\" tugmasi matnli/rasm va musiqali istoryani "
+    "birlashtiradi - bosgach turini tanlaysiz.\n\n"
     "Kanalga joylanadigan har qanday post (siz yozdirgan post/so'rovnoma, kanal "
     "kuzatuvchi dayjesti, AI dayjest) oldin sizga TUGMA bilan keladi - qaysi "
-    "kanalga joylashni tanlaysiz (yoki ❌ Bekor). Faqat siz tasdiqlagan xabar "
-    "kanalga chiqadi.\n\n"
+    "kanalga joylashni tanlaysiz: \U0001F4E2 birinchi kanal, \U0001F4F0 ikkinchi "
+    "kanal, yoki \U0001F4E2\U0001F4F0 ikkala kanalga birdan (yoki ❌ Bekor). Faqat "
+    "siz tasdiqlagan xabar kanalga chiqadi.\n\n"
     "Sizdan boshqa odam yozsa - Nova o'zi yordam berishga urinadi; hal qilolmasa "
-    "(narx/kelishuv kabi) sizga yetkazadi va odamga \"Asadbek o'zi bog'lanadi\" deydi.\n"
-    "Har kuni 07:00 da Farg'ona ob-havosini yuboraman."
+    "(narx/kelishuv kabi) sizga yetkazadi va odamga \"Asadbek o'zi bog'lanadi\" deydi."
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -670,8 +718,8 @@ async def ai_dayjest(context: ContextTypes.DEFAULT_TYPE):
                 }
                 await context.bot.send_message(
                     ADMIN_CHAT_ID,
-                    "\U00002753 Shu dayjestni boshqa kanalingizga ham joylaymizmi? "
-                    "Tugmadan tanlang \U0001F447",
+                    f"\U00002753 Shu dayjestni boshqa kanalingizga ham joylaymizmi? "
+                    f"Tugmadan tanlang \U0001F447\n\n{post}",
                     reply_markup=_tasdiq_klaviatura("avto"),
                 )
             return
@@ -827,23 +875,17 @@ async def tasdiq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("❌ Bekor qildim.")
         return
 
-    kanal = _tanlangan_kanal(kod)
-    if not kanal:
+    kanallar = _tanlangan_kanallar(kod)
+    if not kanallar:
         await q.message.reply_text("Bu kanal sozlanmagan (.env da NEWS_KANAL / KANAL2).")
         return
 
     del context.chat_data[kalit]
     await q.edit_message_reply_markup(reply_markup=None)
-    try:
-        if tur == "sorov":
-            await context.bot.send_poll(
-                kanal,
-                question=payload["savol"][:300],
-                options=[v[:100] for v in payload["variantlar"][:10]],
-                is_anonymous=True,
-            )
-        elif tur == "post" and payload.get("vaqt"):
-            vaqt = datetime.fromisoformat(payload["vaqt"])
+
+    if tur == "post" and payload.get("vaqt"):
+        vaqt = datetime.fromisoformat(payload["vaqt"])
+        for kanal in kanallar:
             conn = db()
             cur = conn.execute(
                 "INSERT INTO vaqtli_postlar (matn, vaqt, rasm, kanal) VALUES (?, ?, ?, ?)",
@@ -857,21 +899,42 @@ async def tasdiq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data={"id": pid, "matn": payload["matn"],
                       "rasm": payload.get("rasm"), "kanal": kanal},
             )
-            await q.message.reply_text(
-                f"✅ {vaqt.strftime('%d.%m %H:%M')} da {kanal} ga joylayman."
-            )
-            return
-        else:  # post yoki avto — hozir joylash
-            await _postni_yubor(context.bot, kanal, payload["matn"], payload.get("rasm"))
-            if tur == "avto" and payload.get("turi") == "ai_dayjest":
-                oldingi = sozlama_ol("dayjest_xotira", "")
-                yangi = (payload["matn"][:700] + "\n---\n" + oldingi)[:2500]
-                sozlama_qoy("dayjest_xotira", yangi)
-        await q.message.reply_text(f"✅ {kanal} ga joylandi!")
-    except Exception as e:
-        log.error("Tasdiq/joylashda xato: %s", e)
+        nomlar = ", ".join(str(k) for k in kanallar)
         await q.message.reply_text(
-            f"{kanal} ga joylashda xatolik — bot o'sha kanalda admin ekanini tekshiring."
+            f"✅ {vaqt.strftime('%d.%m %H:%M')} da {nomlar} ga joylayman."
+        )
+        return
+
+    # Sorovnoma yoki post/avto — hozir joylash (har bir kanalga alohida)
+    joylandi, xatolar = [], []
+    for kanal in kanallar:
+        try:
+            if tur == "sorov":
+                await context.bot.send_poll(
+                    kanal,
+                    question=payload["savol"][:300],
+                    options=[v[:100] for v in payload["variantlar"][:10]],
+                    is_anonymous=True,
+                )
+            else:  # post yoki avto
+                await _postni_yubor(context.bot, kanal, payload["matn"], payload.get("rasm"))
+            joylandi.append(str(kanal))
+        except Exception as e:
+            log.error("Tasdiq/joylashda xato (%s): %s", kanal, e)
+            xatolar.append(str(kanal))
+
+    # Dayjest xotirasini faqat muvaffaqiyatli joylangach yangilaymiz
+    if joylandi and tur == "avto" and payload.get("turi") == "ai_dayjest":
+        oldingi = sozlama_ol("dayjest_xotira", "")
+        yangi = (payload["matn"][:700] + "\n---\n" + oldingi)[:2500]
+        sozlama_qoy("dayjest_xotira", yangi)
+
+    if joylandi:
+        await q.message.reply_text(f"✅ {', '.join(joylandi)} ga joylandi!")
+    if xatolar:
+        await q.message.reply_text(
+            f"⚠️ {', '.join(xatolar)} ga joylay olmadim — bot o'sha kanal(lar)da "
+            "admin ekanini tekshiring."
         )
 
 
@@ -1307,6 +1370,30 @@ async def _musiqali_story(update: Update, context: ContextTypes.DEFAULT_TYPE,
     )
 
 
+async def story_tanlov_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """"Story" menyu tugmasidan keyin — matnli/rasm yoki musiqali istorya turini tanlash."""
+    q = update.callback_query
+    if not (ADMIN_CHAT_ID and q.from_user.id == ADMIN_CHAT_ID):
+        await q.answer("Bu tugma faqat bot egasi uchun.", show_alert=True)
+        return
+    await q.answer()
+    tur = q.data.split(":")[1]
+    await q.edit_message_reply_markup(reply_markup=None)
+    if tur == "matn":
+        context.chat_data["menyu_rejim"] = "story"
+        await q.message.reply_text(
+            "\U0001F4DD Istorya matnini yozing (chiroyli rasm qilaman), yoki rasm/videoga "
+            "reply qilib /story yuboring.", reply_markup=EGA_MENYU,
+        )
+    else:  # musiqa
+        context.chat_data["menyu_rejim"] = "musiqa"
+        await q.message.reply_text(
+            "\U0001F3B5 Qaysi qo'shiq? Nomini yozing — eng rekli qismidan musiqali "
+            "istorya yasayman. (Rasm ustiga qo'yish uchun rasmga reply qilib "
+            "/musiqa <qo'shiq> yuboring.)", reply_markup=EGA_MENYU,
+        )
+
+
 async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish: str):
     """Ega menyu tugmasi yoki menyu-rejim matnini ishlaydi (faqat ega, shaxsiy chat).
 
@@ -1315,9 +1402,13 @@ async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish
     msg = update.effective_message
     matn = (kirish or "").strip()
 
-    # 1) Menyu tugmasi bosilgan — kutilayotgan rejimni bekor qilib, tugmani ishlaymiz
+    # 1) Menyu tugmasi bosilgan — kutilayotgan rejimni bekor qilib, tugmani ishlaymiz.
+    #    Har bir bo'lim uchun tegishli /buyruq yordamini ham yuboramiz (MENYU_YORDAMI).
     if matn in MENYU_TUGMALARI:
         context.chat_data.pop("menyu_rejim", None)
+        yordam = MENYU_YORDAMI.get(matn)
+        if yordam:
+            await msg.reply_text(yordam)
         if matn == "\U0001F4B1 Valyuta":
             await valyuta(update, context)
         elif matn == "\U000023F0 Eslatmalar":
@@ -1328,28 +1419,20 @@ async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish
             await dayjest_buyrug(update, context)
         elif matn == "\U00002139 Yordam":
             await start(update, context)
-        elif matn == "\U0001F324 Ob-havo":
-            context.chat_data["menyu_rejim"] = "obhavo"
-            await msg.reply_text(
-                "Qaysi shaharning ob-havosi? (masalan: Toshkent)", reply_markup=EGA_MENYU
-            )
         elif matn == "\U0001F4DD Post yozish":
             context.chat_data["menyu_rejim"] = "post"
             await msg.reply_text(
                 "Nima haqida post yozay? Mavzuni yozing:", reply_markup=EGA_MENYU
             )
-        elif matn == "\U0001F4F8 Istorya":
-            context.chat_data["menyu_rejim"] = "story"
+        elif matn == "\U0001F4F8 Story":
+            # Matnli/rasm istorya va musiqali istorya — bitta tugma, turini tanlaymiz
+            klaviatura = InlineKeyboardMarkup([[
+                InlineKeyboardButton("\U0001F4DD Matn/rasm", callback_data="story:matn"),
+                InlineKeyboardButton("\U0001F3B5 Musiqali", callback_data="story:musiqa"),
+            ]])
             await msg.reply_text(
-                "Istorya matnini yozing (chiroyli rasm qilaman), yoki rasm/videoga "
-                "reply qilib /story yuboring.", reply_markup=EGA_MENYU
-            )
-        elif matn == "\U0001F3B5 Musiqali story":
-            context.chat_data["menyu_rejim"] = "musiqa"
-            await msg.reply_text(
-                "Qaysi qo'shiq? Nomini yozing — eng rekli qismidan musiqali istorya "
-                "yasayman. (Rasm ustiga qo'yish uchun rasmga reply qilib /musiqa "
-                "<qo'shiq> deб yuboring.)", reply_markup=EGA_MENYU
+                "Qanday istorya joylaymiz? Turini tanlang \U0001F447",
+                reply_markup=klaviatura,
             )
         elif matn == "\U0001F9E0 Bilim":
             joriy = sozlama_ol("bilim", "")
@@ -1367,10 +1450,6 @@ async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish
     rejim = context.chat_data.get("menyu_rejim")
     if rejim and matn:
         context.chat_data.pop("menyu_rejim", None)
-        if rejim == "obhavo":
-            context.args = matn.split()
-            await obhavo(update, context)
-            return "STOP"
         if rejim == "bilim":
             sozlama_qoy("bilim", matn)
             await msg.reply_text(
@@ -1807,8 +1886,9 @@ def main():
     app.add_handler(CommandHandler("story", story_buyrug))
     app.add_handler(CommandHandler("musiqa", musiqa_buyrug))
     app.add_handler(CallbackQueryHandler(
-        tasdiq_callback, pattern=r"^tasdiq:(post|sorov|avto):(k1|k2|no)$"
+        tasdiq_callback, pattern=r"^tasdiq:(post|sorov|avto):(k1|k2|ikki|no)$"
     ))
+    app.add_handler(CallbackQueryHandler(story_tanlov_callback, pattern=r"^story:(matn|musiqa)$"))
     app.add_handler(MessageHandler(
         ((filters.TEXT | filters.CAPTION | filters.FORWARDED | filters.PHOTO
           | filters.Document.ALL) & ~filters.COMMAND)
