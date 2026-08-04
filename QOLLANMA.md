@@ -85,6 +85,13 @@ qilasiz:
   fon-rasm yasab, story qo'yadi.
 - Story shaxsiy profilingizga 24 soatga joylanadi.
 
+### 🎵 Musiqali istorya — `/musiqa`
+`/musiqa <qo'shiq nomi>` — bot qo'shiqni YouTube'dan topadi, uning **eng "rekli"
+(eng ko'p qayta ko'rilgan) qismini** ajratadi va rasm+musiqadan video istorya yasab,
+profilingizga joylaydi. Rasm ustiga qo'yish uchun rasmga **reply** qilib `/musiqa
+<qo'shiq>` yozing; rasmsiz bo'lsa qo'shiq nomi fon qilib chiqadi. Menyudagi
+**🎵 Musiqali story** tugmasi ham shu ishni qiladi.
+
 ### 🧠 Bilim bazasi — `/bilim`
 Nova mijozlarga to'g'ri javob berishi uchun xizmatlaringiz/narx/FAQ'ni kiriting:
 ```

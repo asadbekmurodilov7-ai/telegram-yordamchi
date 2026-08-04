@@ -67,12 +67,14 @@ def _rasmmi(nom: str, mime: str) -> bool:
 
 
 async def story_qoy(media, nom: str = "story.jpg", mime: str = "image/jpeg",
-                    caption: str = "", davomiylik: int = STORY_DAVOMIYLIK) -> None:
+                    caption: str = "", davomiylik: int = STORY_DAVOMIYLIK,
+                    video_uzunlik: int = 0, en: int = 1080, boy: int = 1920) -> None:
     """Shaxsiy profilga story qo'yadi.
 
     media: bytes (rasm/video mazmuni) yoki fayl yo'li (str).
     nom/mime: media turini aniqlash uchun.
     caption: story ustiga yoziladigan matn (ixtiyoriy).
+    video_uzunlik/en/boy: video story uchun davomiylik(soniya) va o'lchamlar.
     """
     from telethon.tl import functions, types
 
@@ -92,7 +94,7 @@ async def story_qoy(media, nom: str = "story.jpg", mime: str = "image/jpeg",
             file=yuklangan,
             mime_type=mime or "video/mp4",
             attributes=[types.DocumentAttributeVideo(
-                duration=0, w=0, h=0, supports_streaming=True,
+                duration=int(video_uzunlik), w=en, h=boy, supports_streaming=True,
             )],
         )
 
@@ -106,13 +108,49 @@ async def story_qoy(media, nom: str = "story.jpg", mime: str = "image/jpeg",
     log.info("Story joylandi (nom=%s, mime=%s)", nom, mime)
 
 
-def matnli_rasm(matn: str) -> bytes:
-    """Matndan oddiy, chiroyli fon-rasm (1080x1920 PNG) yasaydi — matnli story uchun.
+def _shrift(olcham: int):
+    """Berilgan o'lchamdagi qalin shrift (truetype bo'lmasa Pillow'ning o'lchamli defaulti)."""
+    from PIL import ImageFont
+    for yol in (
+        "C:/Windows/Fonts/arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        try:
+            return ImageFont.truetype(yol, olcham)
+        except OSError:
+            continue
+    try:  # Pillow >= 10.1: o'lchamli default (truetype topilmasa ham katta chiqadi)
+        return ImageFont.load_default(size=olcham)
+    except TypeError:
+        return ImageFont.load_default()
 
-    Pillow kutubxonasi kerak. O'rnatilmagan bo'lsa RuntimeError chiqadi.
+
+def _satrlarga_bol(chiz, matn, shrift, maks_en):
+    """Matnni piksel kengligiga qarab satrlarga bo'ladi."""
+    satrlar, joriy = [], ""
+    for soz in matn.split():
+        sinov = f"{joriy} {soz}".strip()
+        quti = chiz.textbbox((0, 0), sinov, font=shrift)
+        if quti[2] - quti[0] <= maks_en or not joriy:
+            joriy = sinov
+        else:
+            satrlar.append(joriy)
+            joriy = soz
+    if joriy:
+        satrlar.append(joriy)
+    return satrlar
+
+
+def matnli_rasm(matn: str) -> bytes:
+    """Matndan chiroyli, KATTA yozuvli fon-rasm (1080x1920 PNG) yasaydi — matnli story uchun.
+
+    Shrift matn uzunligiga qarab avtomatik moslashadi (qisqa matn — juda katta).
     """
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
     except ImportError as e:
         raise RuntimeError(
             "Matnli story uchun Pillow kerak (pip install pillow), yoki /story ni "
@@ -120,42 +158,46 @@ def matnli_rasm(matn: str) -> bytes:
         ) from e
 
     en, boy = 1080, 1920
-    rasm = Image.new("RGB", (en, boy), (18, 22, 33))
+    maks_en = int(en * 0.86)   # matn kengligi chegarasi
+    maks_boy = int(boy * 0.72)  # matn balandligi chegarasi
+
+    # Vertikal gradient fon (to'q ko'k -> siyohrang) — har qatorni chiziq bilan
+    rasm = Image.new("RGB", (en, boy))
     chiz = ImageDraw.Draw(rasm)
+    yuqori, past = (24, 28, 48), (68, 30, 82)
+    for y in range(boy):
+        t = y / boy
+        r = int(yuqori[0] + (past[0] - yuqori[0]) * t)
+        g = int(yuqori[1] + (past[1] - yuqori[1]) * t)
+        b = int(yuqori[2] + (past[2] - yuqori[2]) * t)
+        chiz.line([(0, y), (en, y)], fill=(r, g, b))
 
-    shrift = None
-    for yol in (
-        "C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
-        try:
-            shrift = ImageFont.truetype(yol, 64)
+    # Shrift o'lchamini kattadan boshlab, sig'guncha kichraytiramiz
+    olcham = 150
+    while olcham >= 48:
+        shrift = _shrift(olcham)
+        satrlar = _satrlarga_bol(chiz, matn, shrift, maks_en)
+        qator_h = int(olcham * 1.25)
+        if len(satrlar) * qator_h <= maks_boy and all(
+            chiz.textbbox((0, 0), s, font=shrift)[2] <= maks_en for s in satrlar
+        ):
             break
-        except OSError:
-            continue
-    if shrift is None:
-        shrift = ImageFont.load_default()
+        olcham -= 10
+    else:
+        shrift = _shrift(48)
+        satrlar = _satrlarga_bol(chiz, matn, shrift, maks_en)
+        qator_h = int(48 * 1.25)
 
-    # Matnni satrlarga bo'lish (taxminan 22 belgi/satr)
-    sozlar, satrlar, joriy = matn.split(), [], ""
-    for soz in sozlar:
-        if len(joriy) + len(soz) + 1 <= 22:
-            joriy = f"{joriy} {soz}".strip()
-        else:
-            satrlar.append(joriy)
-            joriy = soz
-    if joriy:
-        satrlar.append(joriy)
-
-    qator_balandligi = 90
-    umumiy = len(satrlar) * qator_balandligi
+    umumiy = len(satrlar) * qator_h
     y = (boy - umumiy) // 2
     for satr in satrlar:
         quti = chiz.textbbox((0, 0), satr, font=shrift)
         w = quti[2] - quti[0]
-        chiz.text(((en - w) // 2, y), satr, fill=(240, 244, 255), font=shrift)
-        y += qator_balandligi
+        x = (en - w) // 2
+        # yumshoq soya (o'qilishi uchun)
+        chiz.text((x + 4, y + 4), satr, fill=(0, 0, 0), font=shrift)
+        chiz.text((x, y), satr, fill=(245, 247, 255), font=shrift)
+        y += qator_h
 
     chiqish = io.BytesIO()
     rasm.save(chiqish, format="PNG")

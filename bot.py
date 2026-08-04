@@ -62,6 +62,7 @@ from telegram.ext import (
 )
 
 import story  # istorya (Telethon userbot) — shaxsiy profilga story qo'yish
+import musiqa  # musiqali istorya (yt-dlp + ffmpeg)
 
 load_dotenv()
 
@@ -186,19 +187,20 @@ def _tanlangan_kanal(kod: str):
 EGA_MENYU = ReplyKeyboardMarkup(
     [
         ["\U0001F4DD Post yozish", "\U0001F4F8 Istorya"],
-        ["\U0001F4F0 AI dayjest", "\U0001F9E0 Bilim"],
-        ["\U0001F324 Ob-havo", "\U0001F4B1 Valyuta"],
-        ["\U000023F0 Eslatmalar", "\U0001F4CB Kanallar"],
-        ["\U00002139 Yordam"],
+        ["\U0001F3B5 Musiqali story", "\U0001F4F0 AI dayjest"],
+        ["\U0001F9E0 Bilim", "\U0001F324 Ob-havo"],
+        ["\U0001F4B1 Valyuta", "\U000023F0 Eslatmalar"],
+        ["\U0001F4CB Kanallar", "\U00002139 Yordam"],
     ],
     resize_keyboard=True,
 )
 
 # Menyu tugmalari matni (ai_javob'da oddiy suhbatdan ajratish uchun)
 MENYU_TUGMALARI = {
-    "\U0001F4DD Post yozish", "\U0001F4F8 Istorya", "\U0001F4F0 AI dayjest",
-    "\U0001F9E0 Bilim", "\U0001F324 Ob-havo", "\U0001F4B1 Valyuta",
-    "\U000023F0 Eslatmalar", "\U0001F4CB Kanallar", "\U00002139 Yordam",
+    "\U0001F4DD Post yozish", "\U0001F4F8 Istorya", "\U0001F3B5 Musiqali story",
+    "\U0001F4F0 AI dayjest", "\U0001F9E0 Bilim", "\U0001F324 Ob-havo",
+    "\U0001F4B1 Valyuta", "\U000023F0 Eslatmalar", "\U0001F4CB Kanallar",
+    "\U00002139 Yordam",
 }
 
 
@@ -661,6 +663,17 @@ async def ai_dayjest(context: ContextTypes.DEFAULT_TYPE):
                         f"\U000026A0️ {AVTO_NEWS_KANAL} ga joylay olmadim (bot admin ekanini "
                         f"tekshiring). Dayjest:\n\n{post}",
                     )
+            # Avto joylagach — boshqa kanallarga ham joylash uchun tugma taklif qilamiz
+            if ADMIN_CHAT_ID and (NEWS_KANAL or KANAL2):
+                context.application.chat_data[ADMIN_CHAT_ID]["kutilayotgan_avto_post"] = {
+                    "turi": "ai_dayjest_extra", "matn": post, "rasm": None,
+                }
+                await context.bot.send_message(
+                    ADMIN_CHAT_ID,
+                    "\U00002753 Shu dayjestni boshqa kanalingizga ham joylaymizmi? "
+                    "Tugmadan tanlang \U0001F447",
+                    reply_markup=_tasdiq_klaviatura("avto"),
+                )
             return
 
         if not ADMIN_CHAT_ID:
@@ -766,6 +779,26 @@ async def story_buyrug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Istorya joylay olmadim: {e}")
         return
     await update.message.reply_text("✅ Istorya profilingizga joylandi!")
+
+
+async def musiqa_buyrug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Musiqali istorya: /musiqa <qo'shiq nomi> (rasmga reply qilsa — rasm fon bo'ladi)."""
+    if not egami(update):
+        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    nom = " ".join(context.args).strip()
+    if not nom:
+        context.chat_data["menyu_rejim"] = "musiqa"
+        await update.message.reply_text(
+            "Qaysi qo'shiq? Nomini yozing:", reply_markup=EGA_MENYU
+        )
+        return
+    rasm_bytes = None
+    manba = update.message.reply_to_message
+    if manba and manba.photo:
+        tg_fayl = await manba.photo[-1].get_file()
+        rasm_bytes = bytes(await tg_fayl.download_as_bytearray())
+    await _musiqali_story(update, context, nom, rasm_bytes)
 
 
 async def tasdiq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1246,6 +1279,34 @@ async def _story_matndan(update: Update, context: ContextTypes.DEFAULT_TYPE, mat
     await msg.reply_text("✅ Istorya profilingizga joylandi!", reply_markup=EGA_MENYU)
 
 
+async def _musiqali_story(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                          nom: str, rasm_bytes: bytes | None = None):
+    """Qo'shiqni topib, eng rekli qismidan musiqali video istorya joylaydi."""
+    msg = update.effective_message
+    if not story.sozlanganmi():
+        await msg.reply_text("Istorya sozlanmagan (.env da TG_SESSION yo'q). /story")
+        return
+    await msg.reply_text(
+        f"\U0001F3B5 '{nom}' qo'shig'ini topib, eng rekli qismidan istorya "
+        "yasayapman... biroz kuting."
+    )
+    try:
+        video, sarlavha, klip = await asyncio.to_thread(
+            musiqa.musiqali_video, nom, rasm_bytes, None, 25
+        )
+        await story.story_qoy(
+            video, nom="story.mp4", mime="video/mp4",
+            video_uzunlik=klip, en=1080, boy=1920,
+        )
+    except Exception as e:
+        log.error("Musiqali istorya xatosi: %s", e)
+        await msg.reply_text(f"Musiqali istorya yasay olmadim: {e}")
+        return
+    await msg.reply_text(
+        f"✅ '{sarlavha}' musiqasi bilan istorya joylandi!", reply_markup=EGA_MENYU
+    )
+
+
 async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish: str):
     """Ega menyu tugmasi yoki menyu-rejim matnini ishlaydi (faqat ega, shaxsiy chat).
 
@@ -1283,6 +1344,13 @@ async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish
                 "Istorya matnini yozing (chiroyli rasm qilaman), yoki rasm/videoga "
                 "reply qilib /story yuboring.", reply_markup=EGA_MENYU
             )
+        elif matn == "\U0001F3B5 Musiqali story":
+            context.chat_data["menyu_rejim"] = "musiqa"
+            await msg.reply_text(
+                "Qaysi qo'shiq? Nomini yozing — eng rekli qismidan musiqali istorya "
+                "yasayman. (Rasm ustiga qo'yish uchun rasmga reply qilib /musiqa "
+                "<qo'shiq> deб yuboring.)", reply_markup=EGA_MENYU
+            )
         elif matn == "\U0001F9E0 Bilim":
             joriy = sozlama_ol("bilim", "")
             context.chat_data["menyu_rejim"] = "bilim"
@@ -1312,6 +1380,9 @@ async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish
             return "STOP"
         if rejim == "story":
             await _story_matndan(update, context, matn)
+            return "STOP"
+        if rejim == "musiqa":
+            await _musiqali_story(update, context, matn)
             return "STOP"
         if rejim == "post":
             return f"Kanalga shu mavzuda to'liq tayyor post yoz: {matn}"
@@ -1661,6 +1732,7 @@ EGA_BUYRUQLARI = UMUMIY_BUYRUQLAR + [
     BotCommand("post", "Kanalga qo'lda matn/rasm joylash"),
     BotCommand("dayjest", "AI yangiliklar dayjestini hozir joylash"),
     BotCommand("story", "Profilga istorya qo'yish (rasm/videoga reply)"),
+    BotCommand("musiqa", "Musiqali istorya (qo'shiq nomini yozing)"),
     BotCommand("bilim", "Nova bilim bazasi (xizmat/narx/FAQ)"),
 ]
 
@@ -1733,6 +1805,7 @@ def main():
     app.add_handler(CommandHandler("dayjest", dayjest_buyrug))
     app.add_handler(CommandHandler("bilim", bilim_buyrug))
     app.add_handler(CommandHandler("story", story_buyrug))
+    app.add_handler(CommandHandler("musiqa", musiqa_buyrug))
     app.add_handler(CallbackQueryHandler(
         tasdiq_callback, pattern=r"^tasdiq:(post|sorov|avto):(k1|k2|no)$"
     ))
