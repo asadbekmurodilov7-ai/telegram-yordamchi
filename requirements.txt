@@ -3,3 +3,5 @@ httpx
 anthropic
 google-genai
 python-dotenv
+telethon
+pillow

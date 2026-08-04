@@ -2,3 +2,5 @@
 bot.db
 bot.db-journal
 __pycache__/
+*.session
+www.youtube.com_cookies.txt

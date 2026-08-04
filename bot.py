@@ -39,8 +39,10 @@ Muhit o'zgaruvchilari (environment variables):
 
 import os
 import re
+import asyncio
 import html as html_mod
 import sqlite3
+import json
 import logging
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
@@ -49,11 +51,17 @@ import httpx
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from telegram import BotCommand, BotCommandScopeChat, Update
+from telegram import (
+    BotCommand, BotCommandScopeChat, InlineKeyboardButton,
+    InlineKeyboardMarkup, Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters,
+    Application, CallbackQueryHandler, CommandHandler, MessageHandler,
+    ContextTypes, filters,
 )
+
+import story  # istorya (Telethon userbot) — shaxsiy profilga story qo'yish
 
 load_dotenv()
 
@@ -78,6 +86,10 @@ def _kanal_manzili(qiymat: str):
 
 
 NEWS_KANAL = _kanal_manzili(os.environ.get("NEWS_KANAL", ""))
+# 2-kanal — post joylashda tugma bilan tanlanadi (bot o'sha kanalda admin bo'lishi shart)
+KANAL2 = _kanal_manzili(os.environ.get("KANAL2", ""))
+# Avto yangiliklar kanali — AI dayjest TASDIQSIZ, to'g'ridan-to'g'ri shu kanalga joylanadi
+AVTO_NEWS_KANAL = _kanal_manzili(os.environ.get("AVTO_NEWS_KANAL", ""))
 
 VAQT_ZONASI = ZoneInfo("Asia/Tashkent")
 FARGONA = {"nom": "Farg'ona", "lat": 40.3864, "lon": 71.7843}
@@ -109,6 +121,10 @@ def db():
         conn.execute("ALTER TABLE vaqtli_postlar ADD COLUMN rasm TEXT")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE vaqtli_postlar ADD COLUMN kanal TEXT")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -132,6 +148,38 @@ def sozlama_qoy(kalit, qiymat):
 
 def egami(update: Update) -> bool:
     return ADMIN_CHAT_ID and update.effective_chat.id == ADMIN_CHAT_ID
+
+
+def _kanal_nomi(kanal) -> str:
+    """Tugmada ko'rsatish uchun qisqa nom (@username yoki ID)."""
+    return str(kanal) if kanal is not None else ""
+
+
+def _tasdiq_klaviatura(tur: str) -> InlineKeyboardMarkup:
+    """Postni tasdiqlash + qaysi kanalga joylash tugmalari.
+
+    tur: 'post' | 'sorov' | 'avto' — qaysi kutilayotgan taklif ekanini bildiradi.
+    callback_data: 'tasdiq:<tur>:<k1|k2|no>'
+    """
+    kanal_qatori = []
+    if NEWS_KANAL:
+        kanal_qatori.append(InlineKeyboardButton(
+            f"\U0001F4E2 {_kanal_nomi(NEWS_KANAL)}", callback_data=f"tasdiq:{tur}:k1"
+        ))
+    if KANAL2:
+        kanal_qatori.append(InlineKeyboardButton(
+            f"\U0001F4F0 {_kanal_nomi(KANAL2)}", callback_data=f"tasdiq:{tur}:k2"
+        ))
+    qatorlar = []
+    if kanal_qatori:
+        qatorlar.append(kanal_qatori)
+    qatorlar.append([InlineKeyboardButton("❌ Bekor", callback_data=f"tasdiq:{tur}:no")])
+    return InlineKeyboardMarkup(qatorlar)
+
+
+def _tanlangan_kanal(kod: str):
+    """'k1' -> NEWS_KANAL, 'k2' -> KANAL2."""
+    return NEWS_KANAL if kod == "k1" else KANAL2 if kod == "k2" else None
 
 
 # ---------------------------------------------------------------- Gemini (yagona AI)
@@ -190,10 +238,16 @@ EGA_YORDAMI = (
     "• /kanal_ochir kanal_nomi - kuzatuvdan olib tashlash\n"
     "• /kanallar - kuzatilayotgan kanallar\n"
     "• /post matn - o'z kanalingizga qo'lda joylashtirish (rasmli xabarga\n"
-    "  javob qilib ham ishlatsa bo'ladi)\n\n"
-    "Kanalga avtomatik joylanadigan har qanday post (kanal kuzatuvchi dayjesti, "
-    "AI dayjest) oldin sizdan tasdiq so'raydi - \"ha\" yoki \"yo'q\" deb javob "
-    "bering.\n"
+    "  javob qilib ham ishlatsa bo'ladi)\n"
+    "• /story - profilingizga istorya qo'yish (rasm/videoga reply, yoki /story matn)\n"
+    "• /bilim matn - Nova mijozlarga javob berishda ishlatadigan ma'lumot\n"
+    "  (xizmatlar/narx/FAQ). /bilim (matnsiz) - hozirgisini ko'rsatadi\n\n"
+    "Kanalga joylanadigan har qanday post (siz yozdirgan post/so'rovnoma, kanal "
+    "kuzatuvchi dayjesti, AI dayjest) oldin sizga TUGMA bilan keladi - qaysi "
+    "kanalga joylashni tanlaysiz (yoki ❌ Bekor). Faqat siz tasdiqlagan xabar "
+    "kanalga chiqadi.\n\n"
+    "Sizdan boshqa odam yozsa - Nova o'zi yordam berishga urinadi; hal qilolmasa "
+    "(narx/kelishuv kabi) sizga yetkazadi va odamga \"Asadbek o'zi bog'lanadi\" deydi.\n"
     "Har kuni 07:00 da Farg'ona ob-havosini yuboraman."
 )
 
@@ -242,14 +296,15 @@ async def eslatma_yubor(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def vaqtli_post_yubor(context: ContextTypes.DEFAULT_TYPE):
-    """AI orqali taklif qilingan, vaqti belgilangan postni kanalga joylaydi."""
+    """AI orqali taklif qilingan, vaqti belgilangan postni tanlangan kanalga joylaydi."""
     data = context.job.data
-    if NEWS_KANAL:
+    kanal = data.get("kanal") or NEWS_KANAL
+    if kanal:
         try:
-            await _postni_yubor(context.bot, NEWS_KANAL, data["matn"], data.get("rasm"))
+            await _postni_yubor(context.bot, kanal, data["matn"], data.get("rasm"))
             if ADMIN_CHAT_ID:
                 await context.bot.send_message(
-                    ADMIN_CHAT_ID, f"✅ Vaqtli post kanalga joylandi:\n\n{data['matn']}"
+                    ADMIN_CHAT_ID, f"✅ Vaqtli post {kanal} ga joylandi:\n\n{data['matn']}"
                 )
         except Exception as e:
             log.error("Vaqtli post yuborishda xato: %s", e)
@@ -518,22 +573,27 @@ async def kanallarni_tekshir(context: ContextTypes.DEFAULT_TYPE):
                     f"\U0001F517 https://t.me/{nom}"
                 )
                 rasm = next((img for _, _, img in reversed(soxrolar) if img), None)
-                if NEWS_KANAL:
+                await _postni_yubor(context.bot, ADMIN_CHAT_ID, matn, rasm)
+                if NEWS_KANAL or KANAL2:
                     context.application.chat_data[ADMIN_CHAT_ID]["kutilayotgan_avto_post"] = {
                         "turi": "kanal_digest", "matn": matn, "rasm": rasm,
                     }
-                    matn += (
-                        "\n\n\U00002753 Buni sizning kanalingizga ham joylashni istaysizmi? "
-                        "\"ha\" yoki \"yo'q\" deb yozing."
+                    await context.bot.send_message(
+                        ADMIN_CHAT_ID,
+                        "\U00002753 Buni kanalingizga ham joylaymizmi? Tugmadan tanlang \U0001F447",
+                        reply_markup=_tasdiq_klaviatura("avto"),
                     )
-                await _postni_yubor(context.bot, ADMIN_CHAT_ID, matn, rasm)
         except Exception as e:
             log.error("Kanal tekshirish xatosi (%s): %s", nom, e)
 
 
 async def ai_dayjest(context: ContextTypes.DEFAULT_TYPE):
-    """Kuniga bir necha marta internetdan AI yangiliklarini topib kanalga dayjest joylaydi."""
-    if not NEWS_KANAL or not GEMINI_API_KEY:
+    """Kuniga bir necha marta internetdan AI yangiliklarini topib kanalga dayjest joylaydi.
+
+    AVTO_NEWS_KANAL sozlangan bo'lsa — tasdiqsiz, to'g'ridan-to'g'ri o'sha kanalga
+    joylanadi. Aks holda egaga tugma bilan tasdiqqa yuboriladi.
+    """
+    if not (NEWS_KANAL or KANAL2 or AVTO_NEWS_KANAL) or not GEMINI_API_KEY:
         return
     uslub_matni = sozlama_ol("uslub", STANDART_USLUB)
     oldingi = sozlama_ol("dayjest_xotira", "")
@@ -561,6 +621,27 @@ async def ai_dayjest(context: ContextTypes.DEFAULT_TYPE):
             log.info("AI dayjest: yangi yangilik topilmadi")
             return
 
+        # Avto yangiliklar kanali sozlangan bo'lsa — tasdiqsiz to'g'ridan-to'g'ri joylash
+        if AVTO_NEWS_KANAL:
+            try:
+                await _postni_yubor(context.bot, AVTO_NEWS_KANAL, post, None)
+                oldingi = sozlama_ol("dayjest_xotira", "")
+                sozlama_qoy("dayjest_xotira", (post[:700] + "\n---\n" + oldingi)[:2500])
+                if ADMIN_CHAT_ID:
+                    await context.bot.send_message(
+                        ADMIN_CHAT_ID,
+                        f"\U0001F4F0 AI dayjest {AVTO_NEWS_KANAL} kanaliga avtomatik joylandi.",
+                    )
+            except Exception as e:
+                log.error("Avto dayjest joylashda xato: %s", e)
+                if ADMIN_CHAT_ID:
+                    await context.bot.send_message(
+                        ADMIN_CHAT_ID,
+                        f"\U000026A0️ {AVTO_NEWS_KANAL} ga joylay olmadim (bot admin ekanini "
+                        f"tekshiring). Dayjest:\n\n{post}",
+                    )
+            return
+
         if not ADMIN_CHAT_ID:
             log.warning("ADMIN_CHAT_ID yo'q, AI dayjest tasdiqqa yuborilmadi")
             return
@@ -570,8 +651,9 @@ async def ai_dayjest(context: ContextTypes.DEFAULT_TYPE):
         }
         await context.bot.send_message(
             ADMIN_CHAT_ID,
-            f"\U0001F4F0 AI dayjest tayyor, kanalga joylashni istaysizmi?\n\n{post}\n\n"
-            "\"ha\" yoki \"yo'q\" deb yozing.",
+            f"\U0001F4F0 AI dayjest tayyor. Qaysi kanalga joylaymiz? Tugmadan tanlang \U0001F447"
+            f"\n\n{post}",
+            reply_markup=_tasdiq_klaviatura("avto"),
         )
     except Exception as e:
         log.error("AI dayjest xatosi: %s", e)
@@ -584,6 +666,159 @@ async def dayjest_buyrug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("\U0001F50D AI yangiliklarini qidiryapman, biroz kuting...")
     await ai_dayjest(context)
+
+
+async def bilim_buyrug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nova qabulxonada foydalanadigan bilim bazasi (xizmatlar/narx/FAQ)."""
+    if not egami(update):
+        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    matn = " ".join(context.args).strip()
+    if not matn:
+        joriy = sozlama_ol("bilim", "")
+        if joriy:
+            await update.message.reply_text(
+                "\U0001F9E0 Nova hozir shu ma'lumotdan foydalanadi:\n\n" + joriy +
+                "\n\nYangilash: /bilim <matn>"
+            )
+        else:
+            await update.message.reply_text(
+                "\U0001F9E0 Bilim bazasi bo'sh. Nova mijozlarga aniq javob berishi uchun "
+                "xizmatlaringiz/narx/FAQ'ni kiriting.\n\nMasalan:\n"
+                "/bilim Men veb-sayt va Telegram bot yasayman. Narxlar kelishiladi. "
+                "Ish vaqti 9:00-18:00."
+            )
+        return
+    sozlama_qoy("bilim", matn)
+    await update.message.reply_text(
+        "✅ Saqladim. Nova endi mijozlarga javob berishda shundan foydalanadi."
+    )
+
+
+async def story_buyrug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shaxsiy profilga istorya (story) qo'yadi.
+
+    Ishlatish:
+      • rasm/videoga REPLY qilib:  /story [ustiga yoziladigan matn]
+      • matnli story:              /story <matn>   (Pillow fon-rasm yasaydi)
+    """
+    if not egami(update):
+        await update.message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    if not story.sozlanganmi():
+        await update.message.reply_text(
+            "Istorya hali sozlanmagan. .env faylida TG_API_ID, TG_API_HASH va "
+            "TG_SESSION bo'lishi kerak — avval `python story_login.py` ni ishga tushiring."
+        )
+        return
+
+    matn = " ".join(context.args).strip()
+    manba = update.message.reply_to_message
+    await update.message.reply_text("\U0001F4F8 Istorya joylayapman...")
+    try:
+        if manba and (manba.photo or manba.video or (manba.document and
+                      (manba.document.mime_type or "").startswith(("image/", "video/")))):
+            if manba.photo:
+                tg_fayl = await manba.photo[-1].get_file()
+                nom, mime = "story.jpg", "image/jpeg"
+            elif manba.video:
+                tg_fayl = await manba.video.get_file()
+                nom, mime = "story.mp4", "video/mp4"
+            else:
+                tg_fayl = await manba.document.get_file()
+                nom = manba.document.file_name or "story"
+                mime = manba.document.mime_type or "application/octet-stream"
+            baytlar = bytes(await tg_fayl.download_as_bytearray())
+            caption = matn or (manba.caption or "")
+            await story.story_qoy(baytlar, nom=nom, mime=mime, caption=caption)
+        elif matn:
+            rasm = await asyncio.to_thread(story.matnli_rasm, matn)
+            await story.story_qoy(rasm, nom="story.png", mime="image/png", caption="")
+        else:
+            await update.message.reply_text(
+                "Istorya uchun rasm/videoga reply qiling yoki matn yozing:\n"
+                "/story Bugungi kun ajoyib!"
+            )
+            return
+    except Exception as e:
+        log.error("Istorya joylashda xato: %s", e)
+        await update.message.reply_text(f"Istorya joylay olmadim: {e}")
+        return
+    await update.message.reply_text("✅ Istorya profilingizga joylandi!")
+
+
+async def tasdiq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Post/so'rovnoma tasdiqlash + kanal tanlash tugmalari bosilganda."""
+    q = update.callback_query
+    if not (ADMIN_CHAT_ID and q.from_user.id == ADMIN_CHAT_ID):
+        await q.answer("Bu tugma faqat bot egasi uchun.", show_alert=True)
+        return
+    await q.answer()
+
+    _, tur, kod = q.data.split(":")
+    kalit = {
+        "post": "kutilayotgan_post",
+        "sorov": "kutilayotgan_sorovnoma",
+        "avto": "kutilayotgan_avto_post",
+    }.get(tur)
+    payload = context.chat_data.get(kalit) if kalit else None
+    if not payload:
+        await q.edit_message_reply_markup(reply_markup=None)
+        await q.message.reply_text("Bu taklif eskirgan yoki allaqachon ishlangan.")
+        return
+
+    if kod == "no":
+        del context.chat_data[kalit]
+        await q.edit_message_reply_markup(reply_markup=None)
+        await q.message.reply_text("❌ Bekor qildim.")
+        return
+
+    kanal = _tanlangan_kanal(kod)
+    if not kanal:
+        await q.message.reply_text("Bu kanal sozlanmagan (.env da NEWS_KANAL / KANAL2).")
+        return
+
+    del context.chat_data[kalit]
+    await q.edit_message_reply_markup(reply_markup=None)
+    try:
+        if tur == "sorov":
+            await context.bot.send_poll(
+                kanal,
+                question=payload["savol"][:300],
+                options=[v[:100] for v in payload["variantlar"][:10]],
+                is_anonymous=True,
+            )
+        elif tur == "post" and payload.get("vaqt"):
+            vaqt = datetime.fromisoformat(payload["vaqt"])
+            conn = db()
+            cur = conn.execute(
+                "INSERT INTO vaqtli_postlar (matn, vaqt, rasm, kanal) VALUES (?, ?, ?, ?)",
+                (payload["matn"], vaqt.isoformat(), payload.get("rasm"), str(kanal)),
+            )
+            conn.commit()
+            pid = cur.lastrowid
+            conn.close()
+            context.job_queue.run_once(
+                vaqtli_post_yubor, when=vaqt,
+                data={"id": pid, "matn": payload["matn"],
+                      "rasm": payload.get("rasm"), "kanal": kanal},
+            )
+            await q.message.reply_text(
+                f"✅ {vaqt.strftime('%d.%m %H:%M')} da {kanal} ga joylayman."
+            )
+            return
+        else:  # post yoki avto — hozir joylash
+            await _postni_yubor(context.bot, kanal, payload["matn"], payload.get("rasm"))
+            if tur == "avto" and payload.get("turi") == "ai_dayjest":
+                oldingi = sozlama_ol("dayjest_xotira", "")
+                yangi = (payload["matn"][:700] + "\n---\n" + oldingi)[:2500]
+                sozlama_qoy("dayjest_xotira", yangi)
+        await q.message.reply_text(f"✅ {kanal} ga joylandi!")
+    except Exception as e:
+        log.error("Tasdiq/joylashda xato: %s", e)
+        await q.message.reply_text(
+            f"{kanal} ga joylashda xatolik — bot o'sha kanalda admin ekanini tekshiring."
+        )
 
 
 async def kanal_qosh(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -683,87 +918,118 @@ async def post_qil(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------- qabulxona (boshqa odamlar uchun)
-async def qabulxona_javob(msg, context, kim: str, kirish: str):
-    """Asadbekdan boshqa odamlar yozganda - 3 bosqichli qat'iy qabulxonachi rejimi."""
-    bosqich = context.chat_data.get("qabul_bosqich", 0)
+ESKALATSIYA_JAVOBI = (
+    "Bu masalada Asadbekning o'zi hal qilgani to'g'ri bo'ladi. Xabaringizni unga "
+    "yetkazdim — bo'shashi bilan o'zi siz bilan bog'lanadi. \U0001F64F"
+)
 
-    # 1-bosqich: birinchi murojaat - tanishuv (doim bir xil, AI shart emas)
-    if bosqich == 0:
-        context.chat_data["qabul_bosqich"] = 1
+
+async def _egaga_yetkaz(context, kim: str, username: str, kirish: str, yechildimi: bool):
+    """Mijoz murojaatini Asadbekka yuboradi. yechildimi=False bo'lsa — ogohlantirish tagi bilan."""
+    if not ADMIN_CHAT_ID:
+        return
+    kontakt = f"{kim} (@{username})" if username else kim
+    if yechildimi:
+        bosh = f"\U00002139️ Nova {kontakt} ga o'zi javob berdi:"
+    else:
+        bosh = (
+            f"\U000026A0️ YECHILMADI — SIZ BOG'LANING\n{kontakt} sizga yozdi, "
+            "Nova o'zi hal qilolmadi:"
+        )
+    try:
+        await context.bot.send_message(ADMIN_CHAT_ID, f"{bosh}\n\n{kirish}")
+    except Exception as e:
+        log.error("Egaga yetkazishda xato: %s", e)
+
+
+async def qabulxona_javob(msg, context, kim: str, kirish: str):
+    """Asadbekdan boshqa odam yozganda — Nova muammoni O'ZI yechishga urinadi.
+
+    Yecholmasa yoki shaxsiy/pul/kelishuv masalasi bo'lsa — 'Asadbek o'zi bog'lanadi'
+    deydi va murojaatni Asadbekka yetkazadi.
+    """
+    username = (msg.from_user.username or "") if msg.from_user else ""
+
+    # 1-murojaat: tanishuv (doim bir xil, AI shart emas)
+    if not context.chat_data.get("qabul_tanishildi"):
+        context.chat_data["qabul_tanishildi"] = True
         await msg.reply_text(
-            "Salom! \U0001F44B Asadbek hozir band. Men uning yordamchisi Nova'man. "
-            "Sizga qanday yordam kerak?"
+            "Salom! \U0001F44B Men Asadbekning yordamchisi Nova'man. Asadbek hozir "
+            "band, lekin men sizga yordam berishga harakat qilaman — muammoingizni "
+            "yoki savolingizni yozing."
         )
         return
 
     if not kirish:
-        kirish = "(matnsiz xabar - rasm yoki fayl yubordi)"
+        kirish = "(matnsiz xabar — rasm yoki fayl yubordi)"
 
+    # AI o'chiq bo'lsa — xavfsiz zaxira: Asadbekka yetkazamiz
     if not GEMINI_API_KEY:
-        await msg.reply_text(
-            "Tushundim, Asadbekka albatta yetkazib qo'yaman."
-            if bosqich == 1 else
-            "Aniq ayta olmayman, lekin Asadbek bo'shagach albatta sizga qaraydi."
-        )
-        if bosqich == 1:
-            context.chat_data["qabul_bosqich"] = 2
+        await msg.reply_text(ESKALATSIYA_JAVOBI)
+        await _egaga_yetkaz(context, kim, username, kirish, yechildimi=False)
         return
 
-    # 2-bosqich: muammosini/so'rovini aytdi - tushunganini bildirib, Asadbekka yetkazishni aytadi
-    if bosqich == 1:
-        context.chat_data["qabul_bosqich"] = 2
-        system = (
-            "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi "
-            "kabi ishlaysan. Foydalanuvchi hozir o'z so'rovini/muammosini "
-            "aytdi. Vazifang: uning aytganini 1 qisqa jumlada tushunganingni "
-            "bildir (so'zma-so'z takrorlama, mazmunini o'zingcha qisqa qayta "
-            "ayt), so'ng albatta shu ma'noda gap qo'sh: 'Asadbek band bo'lgani "
-            "uchun hozir javob berolmayapti, lekin xabaringizni albatta "
-            "yetkazib qo'yaman - u bo'shagach o'zi siz bilan bog'lanadi.' "
-            "Boshqa hech narsa yozma - savol berma, suhbatni davom ettirma, "
-            "his-tuyg'u bildirma. Faqat shu ikki narsa: tushunish + va'da."
-        )
-        try:
-            matn = await gemini_javob(system, kirish, max_tokens=200)
-        except Exception as e:
-            log.error("Qabulxona (Gemini) xatosi: %s", e)
-            matn = ""
-        if not matn:
-            matn = (
-                "Tushundim. Asadbek band bo'lgani uchun hozir javob berolmayapti, "
-                "lekin xabaringizni albatta yetkazib qo'yaman - u bo'shagach o'zi "
-                "siz bilan bog'lanadi."
-            )
-        await msg.reply_text(matn)
-        if ADMIN_CHAT_ID:
-            try:
-                await context.bot.send_message(
-                    ADMIN_CHAT_ID, f"\U0001F4E9 {kim} sizga yozdi:\n\n{kirish}"
-                )
-            except Exception:
-                pass
-        return
+    bilim = sozlama_ol("bilim", "")
+    bilim_blok = (
+        f"\n\nAsadbek va uning xizmatlari haqida ma'lumot (javobingda shundan foydalan):\n{bilim}"
+        if bilim else
+        "\n\n(Asadbekning xizmatlari/narxlari haqida aniq ma'lumot berilmagan — "
+        "narx, kelishuv, hamkorlik kabi savollarni Asadbekning o'ziga havola qil.)"
+    )
+    # Suhbat tarixi (mijoz bilan) — qisqa kontekst
+    tarix = context.chat_data.setdefault("qabul_tarix", [])
+    tarix_matn = "\n".join(f"{r}: {t}" for r, t in tarix[-6:])
 
-    # 3-bosqich va undan keyin: keyingi savollarga (masalan "qachon keladi")
-    # faqat qisqa va aniq javob - ortiqcha suhbat yo'q
     system = (
-        "Sen Asadbekning shaxsiy yordamchisi Nova'san - qabulxonachi kabi "
-        "ishlaysan. Asadbek hozir band, sen uning o'rniga to'liq javob "
-        "berolmaysan. Foydalanuvchi savol berdi (masalan 'qachon keladi' "
-        "kabi) - shu savolga FAQAT 1 ta qisqa jumlada, samimiy va aniq "
-        "javob ber. Agar aniq javobing bo'lmasa (masalan qachon "
-        "bo'shashini bilmasang), 'Aniq vaqtni bilmayman, lekin bo'shagach "
-        "albatta sizga qaraydi' kabi javob ber. Suhbatni davom ettirma, "
-        "qo'shimcha savol berma, ortiqcha gapirma - faqat bitta qisqa jumla yoz."
+        "Sen Nova'san — Asadbekning shaxsiy yordamchisi. Asadbek hozir band, sen "
+        "uning o'rniga mijozlar/odamlar bilan gaplashib, ularning muammosini yoki "
+        "savolini IMKON QADAR O'ZING hal qilasan (maslahat berish, savolga aniq "
+        "javob, yo'l-yo'riq ko'rsatish). Kerak bo'lsa internetdan qidirib aniq "
+        "javob ber."
+        f"{bilim_blok}\n\n"
+        "MUHIM QOIDA — quyidagi hollarda O'ZING javob BERMA, balki Asadbekka havola "
+        "qil (yechildi=false): narx/to'lov/pul masalasi, hamkorlik yoki shartnoma, "
+        "uchrashuv/vaqt belgilash, shaxsiy kelishuv, Asadbekning shaxsiy fikri yoki "
+        "ruxsati kerak bo'lgan holatlar, yoki sen aniq va ishonchli javob berolmaydigan "
+        "har qanday savol. Taxmin qilib noto'g'ri javob berma.\n\n"
+        "Javobni FAQAT quyidagi JSON formatda ber (boshqa hech narsa yozma):\n"
+        '{\"yechildi\": true, \"javob\": \"mijozga aytiladigan aniq, samimiy javob\"}\n'
+        "yoki\n"
+        '{\"yechildi\": false, \"javob\": \"\"}\n'
+        "yechildi=true — sen mijozga to'liq va foydali javob bera olding. "
+        "yechildi=false — masala Asadbekka havola qilinishi kerak (javob bo'sh qoldiriladi, "
+        "tayyor havola matnini tizim o'zi qo'shadi).\n\n"
+        f"Suhbat tarixi:\n{tarix_matn}\n\nMijozning yangi xabari: {kirish}"
     )
+
+    yechildi = False
+    javob = ""
     try:
-        matn = await gemini_javob(system, kirish, max_tokens=200)
+        xom = await gemini_qidiruv_javob(system, kirish, max_tokens=1200)
+        xom = xom.strip()
+        if xom.startswith("```"):
+            xom = xom.strip("`")
+            xom = xom[4:] if xom.lower().startswith("json") else xom
+        bosh, oxir = xom.find("{"), xom.rfind("}")
+        if bosh != -1 and oxir != -1:
+            data = json.loads(xom[bosh:oxir + 1])
+            yechildi = bool(data.get("yechildi"))
+            javob = (data.get("javob") or "").strip()
     except Exception as e:
-        log.error("Qabulxona (Gemini) xatosi: %s", e)
-        matn = ""
-    await msg.reply_text(
-        matn or "Aniq ayta olmayman, lekin Asadbek bo'shagach albatta sizga qaraydi."
-    )
+        log.error("Qabulxona (Gemini/JSON) xatosi: %s", e)
+
+    if yechildi and javob:
+        await msg.reply_text(javob)
+        tarix.append(("Mijoz", kirish))
+        tarix.append(("Nova", javob))
+        del tarix[:-10]
+        await _egaga_yetkaz(context, kim, username, kirish, yechildimi=True)
+    else:
+        await msg.reply_text(ESKALATSIYA_JAVOBI)
+        tarix.append(("Mijoz", kirish))
+        tarix.append(("Nova", ESKALATSIYA_JAVOBI))
+        del tarix[:-10]
+        await _egaga_yetkaz(context, kim, username, kirish, yechildimi=False)
 
 
 def xabar_matni(msg) -> str:
@@ -1118,7 +1384,7 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     post_yordam = ""
-    if amal_ruxsat and NEWS_KANAL:
+    if amal_ruxsat and (NEWS_KANAL or KANAL2):
         post_yordam = (
             "\n\nMUHIM: Agar Asadbek 'kanalimga yoz', 'buni postla', 'post qil', "
             "'kanalga joyla' kabi so'rov bersa - postning to'liq tayyor matnini shu "
@@ -1159,7 +1425,8 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         post_bloki = None
         sorovnoma_bloki = None
-        if amal_ruxsat and NEWS_KANAL and asosiy_matn:
+        tasdiq_markup = None
+        if amal_ruxsat and (NEWS_KANAL or KANAL2) and asosiy_matn:
             try:
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 resp2 = await client.aio.models.generate_content(
@@ -1216,8 +1483,9 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rasm_izoh = "\n\U0001F5BC Rasm bilan birga joylanadi." if post_rasm_id else ""
             matn = (
                 f"\U0001F4CB Taklif etilayotgan post:\n\n{taklif_matn}\n\n{vaqt_izoh}{rasm_izoh}\n\n"
-                "Joylashni istasangiz \"ha\", bekor qilish uchun \"yo'q\" deb yozing."
+                "Qaysi kanalga joylaymiz? Pastdagi tugmadan tanlang \U0001F447"
             )
+            tasdiq_markup = _tasdiq_klaviatura("post")
         elif sorovnoma_bloki is not None:
             savol = (sorovnoma_bloki.args.get("savol") or "").strip()
             variantlar = [
@@ -1232,8 +1500,9 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 matn = (
                     f"\U0001F4CA Taklif etilayotgan so'rovnoma:\n\n"
                     f"❓ {savol}\n{variant_matn}\n\n"
-                    "Joylashni istasangiz \"ha\", bekor qilish uchun \"yo'q\" deb yozing."
+                    "Qaysi kanalga joylaymiz? Pastdagi tugmadan tanlang \U0001F447"
                 )
+                tasdiq_markup = _tasdiq_klaviatura("sorov")
             else:
                 matn = asosiy_matn or "So'rovnoma uchun savol va kamida 2 ta variant kerak."
         else:
@@ -1253,7 +1522,7 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tarix.append({"role": "user", "content": tarix_belgi})
     tarix.append({"role": "assistant", "content": matn})
     del tarix[:-10]
-    await msg.reply_text(matn)
+    await msg.reply_text(matn, reply_markup=tasdiq_markup)
 
 UMUMIY_BUYRUQLAR = [
     BotCommand("start", "Botni ishga tushirish"),
@@ -1271,6 +1540,8 @@ EGA_BUYRUQLARI = UMUMIY_BUYRUQLAR + [
     BotCommand("kanallar", "Kuzatilayotgan kanallar"),
     BotCommand("post", "Kanalga qo'lda matn/rasm joylash"),
     BotCommand("dayjest", "AI yangiliklar dayjestini hozir joylash"),
+    BotCommand("story", "Profilga istorya qo'yish (rasm/videoga reply)"),
+    BotCommand("bilim", "Nova bilim bazasi (xizmat/narx/FAQ)"),
 ]
 
 # ---------------------------------------------------------------- ishga tushirish
@@ -1298,16 +1569,19 @@ async def ishga_tushganda(app: Application):
     log.info("%d ta eslatma tiklandi", len(qatorlar))
 
     conn = db()
-    postlar = conn.execute("SELECT id, matn, vaqt, rasm FROM vaqtli_postlar").fetchall()
+    postlar = conn.execute(
+        "SELECT id, matn, vaqt, rasm, kanal FROM vaqtli_postlar"
+    ).fetchall()
     conn.close()
-    for pid, matn, vaqt, rasm in postlar:
+    for pid, matn, vaqt, rasm, kanal in postlar:
         v = datetime.fromisoformat(vaqt)
         if v.tzinfo is None:
             v = v.replace(tzinfo=VAQT_ZONASI)
         if v <= hozir:
             v = hozir + timedelta(seconds=10)
         app.job_queue.run_once(
-            vaqtli_post_yubor, when=v, data={"id": pid, "matn": matn, "rasm": rasm}
+            vaqtli_post_yubor, when=v,
+            data={"id": pid, "matn": matn, "rasm": rasm, "kanal": kanal},
         )
     log.info("%d ta vaqtli post tiklandi", len(postlar))
 
@@ -1337,6 +1611,11 @@ def main():
     app.add_handler(CommandHandler("kanallar", kanallar_royxati))
     app.add_handler(CommandHandler("post", post_qil))
     app.add_handler(CommandHandler("dayjest", dayjest_buyrug))
+    app.add_handler(CommandHandler("bilim", bilim_buyrug))
+    app.add_handler(CommandHandler("story", story_buyrug))
+    app.add_handler(CallbackQueryHandler(
+        tasdiq_callback, pattern=r"^tasdiq:(post|sorov|avto):(k1|k2|no)$"
+    ))
     app.add_handler(MessageHandler(
         ((filters.TEXT | filters.CAPTION | filters.FORWARDED | filters.PHOTO
           | filters.Document.ALL) & ~filters.COMMAND)
