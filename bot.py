@@ -53,7 +53,7 @@ from google import genai
 from google.genai import types
 from telegram import (
     BotCommand, BotCommandScopeChat, InlineKeyboardButton,
-    InlineKeyboardMarkup, Update,
+    InlineKeyboardMarkup, ReplyKeyboardMarkup, Update,
 )
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -182,6 +182,26 @@ def _tanlangan_kanal(kod: str):
     return NEWS_KANAL if kod == "k1" else KANAL2 if kod == "k2" else None
 
 
+# Ega (Asadbek) uchun doimiy menyu tugmalari — eng muhim buyruqlar bir bosishda
+EGA_MENYU = ReplyKeyboardMarkup(
+    [
+        ["\U0001F4DD Post yozish", "\U0001F4F8 Istorya"],
+        ["\U0001F4F0 AI dayjest", "\U0001F9E0 Bilim"],
+        ["\U0001F324 Ob-havo", "\U0001F4B1 Valyuta"],
+        ["\U000023F0 Eslatmalar", "\U0001F4CB Kanallar"],
+        ["\U00002139 Yordam"],
+    ],
+    resize_keyboard=True,
+)
+
+# Menyu tugmalari matni (ai_javob'da oddiy suhbatdan ajratish uchun)
+MENYU_TUGMALARI = {
+    "\U0001F4DD Post yozish", "\U0001F4F8 Istorya", "\U0001F4F0 AI dayjest",
+    "\U0001F9E0 Bilim", "\U0001F324 Ob-havo", "\U0001F4B1 Valyuta",
+    "\U000023F0 Eslatmalar", "\U0001F4CB Kanallar", "\U00002139 Yordam",
+}
+
+
 # ---------------------------------------------------------------- Gemini (yagona AI)
 async def gemini_javob(system: str, user_text: str, max_tokens: int = 600) -> str:
     """Gemini 2.5 Flash orqali tez javob oladi (qidiruv/tool shart bo'lmagan holatlar uchun)."""
@@ -252,8 +272,9 @@ EGA_YORDAMI = (
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    matn = YORDAM_MATNI + (EGA_YORDAMI if egami(update) else "")
-    await update.message.reply_text(matn)
+    ega = egami(update)
+    matn = YORDAM_MATNI + (EGA_YORDAMI if ega else "")
+    await update.message.reply_text(matn, reply_markup=EGA_MENYU if ega else None)
 
 
 async def chat_id_korsat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1206,6 +1227,98 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------- AI suhbat
+async def _story_matndan(update: Update, context: ContextTypes.DEFAULT_TYPE, matn: str):
+    """Matnli istoryani (Pillow fon-rasm) profilga qo'yadi — menyu 'Istorya' rejimi uchun."""
+    msg = update.effective_message
+    if not story.sozlanganmi():
+        await msg.reply_text(
+            "Istorya hali sozlanmagan (.env da TG_SESSION yo'q). Batafsil: /story"
+        )
+        return
+    await msg.reply_text("\U0001F4F8 Istorya joylayapman...")
+    try:
+        rasm = await asyncio.to_thread(story.matnli_rasm, matn)
+        await story.story_qoy(rasm, nom="story.png", mime="image/png", caption="")
+    except Exception as e:
+        log.error("Menyu istorya xatosi: %s", e)
+        await msg.reply_text(f"Istorya joylay olmadim: {e}")
+        return
+    await msg.reply_text("✅ Istorya profilingizga joylandi!", reply_markup=EGA_MENYU)
+
+
+async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish: str):
+    """Ega menyu tugmasi yoki menyu-rejim matnini ishlaydi (faqat ega, shaxsiy chat).
+
+    Qaytaradi: "STOP" (to'liq ishlandi) | <str> (post uchun yangi kirish) | None.
+    """
+    msg = update.effective_message
+    matn = (kirish or "").strip()
+
+    # 1) Menyu tugmasi bosilgan — kutilayotgan rejimni bekor qilib, tugmani ishlaymiz
+    if matn in MENYU_TUGMALARI:
+        context.chat_data.pop("menyu_rejim", None)
+        if matn == "\U0001F4B1 Valyuta":
+            await valyuta(update, context)
+        elif matn == "\U000023F0 Eslatmalar":
+            await eslatmalar(update, context)
+        elif matn == "\U0001F4CB Kanallar":
+            await kanallar_royxati(update, context)
+        elif matn == "\U0001F4F0 AI dayjest":
+            await dayjest_buyrug(update, context)
+        elif matn == "\U00002139 Yordam":
+            await start(update, context)
+        elif matn == "\U0001F324 Ob-havo":
+            context.chat_data["menyu_rejim"] = "obhavo"
+            await msg.reply_text(
+                "Qaysi shaharning ob-havosi? (masalan: Toshkent)", reply_markup=EGA_MENYU
+            )
+        elif matn == "\U0001F4DD Post yozish":
+            context.chat_data["menyu_rejim"] = "post"
+            await msg.reply_text(
+                "Nima haqida post yozay? Mavzuni yozing:", reply_markup=EGA_MENYU
+            )
+        elif matn == "\U0001F4F8 Istorya":
+            context.chat_data["menyu_rejim"] = "story"
+            await msg.reply_text(
+                "Istorya matnini yozing (chiroyli rasm qilaman), yoki rasm/videoga "
+                "reply qilib /story yuboring.", reply_markup=EGA_MENYU
+            )
+        elif matn == "\U0001F9E0 Bilim":
+            joriy = sozlama_ol("bilim", "")
+            context.chat_data["menyu_rejim"] = "bilim"
+            await msg.reply_text(
+                (f"\U0001F9E0 Hozirgi bilim:\n\n{joriy}\n\nYangilash uchun yangi matn yozing:")
+                if joriy else
+                "\U0001F9E0 Bilim bazasi bo'sh. Nova mijozlarga aniq javob berishi uchun "
+                "xizmat/narx/FAQ yozing:",
+                reply_markup=EGA_MENYU,
+            )
+        return "STOP"
+
+    # 2) Kutilayotgan menyu-rejim (kiritish) matni bo'lsa
+    rejim = context.chat_data.get("menyu_rejim")
+    if rejim and matn:
+        context.chat_data.pop("menyu_rejim", None)
+        if rejim == "obhavo":
+            context.args = matn.split()
+            await obhavo(update, context)
+            return "STOP"
+        if rejim == "bilim":
+            sozlama_qoy("bilim", matn)
+            await msg.reply_text(
+                "✅ Bilim bazasi saqlandi. Nova endi shundan foydalanadi.",
+                reply_markup=EGA_MENYU,
+            )
+            return "STOP"
+        if rejim == "story":
+            await _story_matndan(update, context, matn)
+            return "STOP"
+        if rejim == "post":
+            return f"Kanalga shu mavzuda to'liq tayyor post yoz: {matn}"
+
+    return None
+
+
 async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg is None:
@@ -1228,6 +1341,13 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kim_qabul = update.effective_user.first_name if update.effective_user else "Mijoz"
         await qabulxona_javob(msg, context, kim_qabul or "Mijoz", kirish)
         return
+
+    # Menyu tugmasi/rejimi bo'lsa — shuni ishlaymiz (post rejimi kirishni o'zgartiradi)
+    menyu_natija = await menyu_ishla(update, context, kirish)
+    if menyu_natija == "STOP":
+        return
+    if isinstance(menyu_natija, str):
+        kirish = menyu_natija
 
     if not GEMINI_API_KEY:
         await msg.reply_text(
