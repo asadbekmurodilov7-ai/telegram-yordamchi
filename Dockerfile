@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py story.py musiqa.py ./
+COPY bot.py story.py musiqa.py asadbek-bot-yoriqnoma.md ./
 # YouTube cookies (bo'lsa) — yt-dlp uchun bot-tekshiruvni chetlab o'tishga yordam beradi
 COPY www.youtube.com_cookies.tx[t] ./
 
