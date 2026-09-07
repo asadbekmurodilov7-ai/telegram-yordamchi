@@ -876,11 +876,15 @@ async def yoz_buyrug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Matn bo'sh — nima yozayin?")
         return
 
-    # Tasdiq ID (chat_data'da saqlab)
+    # Tasdiq ID (SQLite'ga yozib qo'yamiz — chat_data qayta ishga tushishda yo'qoladi)
     tasdiq_id = str(int(datetime.now().timestamp()))
-    context.chat_data.setdefault("yoz_navbat", {})[tasdiq_id] = {
-        "hedef": hedef, "matn": matn,
-    }
+    navbat = json.loads(sozlama_ol("yoz_navbat", "{}") or "{}")
+    navbat[tasdiq_id] = {"hedef": hedef, "matn": matn}
+    # Faqat oxirgi 20 ta saqlash — eskilarini o'chir
+    if len(navbat) > 20:
+        eng_yangi = sorted(navbat.keys(), reverse=True)[:20]
+        navbat = {k: navbat[k] for k in eng_yangi}
+    sozlama_qoy("yoz_navbat", json.dumps(navbat, ensure_ascii=False))
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Yubor", callback_data=f"yoz:ok:{tasdiq_id}"),
         InlineKeyboardButton("❌ Bekor", callback_data=f"yoz:no:{tasdiq_id}"),
@@ -901,8 +905,10 @@ async def yoz_tasdiq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         _, action, tid = q.data.split(":", 2)
     except ValueError:
         return
-    navbat = context.chat_data.get("yoz_navbat", {})
+    navbat = json.loads(sozlama_ol("yoz_navbat", "{}") or "{}")
     data = navbat.pop(tid, None)
+    if data:
+        sozlama_qoy("yoz_navbat", json.dumps(navbat, ensure_ascii=False))
     if not data:
         await q.edit_message_text("Bu tasdiq eskirgan (vaqt o'tdi).")
         return
