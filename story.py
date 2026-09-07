@@ -202,3 +202,33 @@ def matnli_rasm(matn: str) -> bytes:
     chiqish = io.BytesIO()
     rasm.save(chiqish, format="PNG")
     return chiqish.getvalue()
+
+
+async def xabar_yubor(kim: str, matn: str) -> str:
+    """Asadbekning shaxsiy akkauntidan boshqa odamga xabar yuboradi.
+    kim: @username yoki telefon raqami (+998...) yoki peer nomi.
+    matn: yuborilgan xabar matni.
+    return: 'OK <username>' yoki xato matni.
+    """
+    from telethon.errors import (
+        UsernameNotOccupiedError, UsernameInvalidError, PeerIdInvalidError,
+        FloodWaitError, UserPrivacyRestrictedError,
+    )
+    client = await _klient()
+    hedef = kim.strip()
+    # @ ni olib tashla, agar bor bo'lsa
+    if hedef.startswith("@"):
+        hedef = hedef[1:]
+    try:
+        entity = await client.get_entity(hedef)
+        await client.send_message(entity, matn)
+        display = getattr(entity, "username", None) or getattr(entity, "first_name", "") or str(hedef)
+        return f"OK @{display}" if getattr(entity, "username", None) else f"OK {display}"
+    except (UsernameNotOccupiedError, UsernameInvalidError, PeerIdInvalidError) as e:
+        return f"XATO: {hedef} topilmadi ({type(e).__name__})"
+    except UserPrivacyRestrictedError:
+        return f"XATO: {hedef} — maxfiylik sozlamalari yozishga ruxsat bermayapti"
+    except FloodWaitError as e:
+        return f"XATO: Telegram vaqtincha to'xtatdi ({e.seconds}s kutish kerak)"
+    except Exception as e:
+        return f"XATO: {type(e).__name__}: {e}"
