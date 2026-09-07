@@ -204,28 +204,68 @@ def matnli_rasm(matn: str) -> bytes:
     return chiqish.getvalue()
 
 
-async def xabar_yubor(kim: str, matn: str) -> str:
-    """Asadbekning shaxsiy akkauntidan boshqa odamga xabar yuboradi.
-    kim: @username yoki telefon raqami (+998...) yoki peer nomi.
-    matn: yuborilgan xabar matni.
-    return: 'OK <username>' yoki xato matni.
-    """
+async def _entity_qidir(client, kim: str):
+    """Entity ni topadi: username, phone yoki ism bilan (dialoglardan)."""
     from telethon.errors import (
         UsernameNotOccupiedError, UsernameInvalidError, PeerIdInvalidError,
-        FloodWaitError, UserPrivacyRestrictedError,
     )
-    client = await _klient()
     hedef = kim.strip()
-    # @ ni olib tashla, agar bor bo'lsa
     if hedef.startswith("@"):
         hedef = hedef[1:]
+
+    # 1. Username yoki phone bilan
     try:
-        entity = await client.get_entity(hedef)
+        return await client.get_entity(hedef), None
+    except (UsernameNotOccupiedError, UsernameInvalidError, PeerIdInvalidError, ValueError):
+        pass
+    except Exception:
+        pass
+
+    # 2. Ism bilan qidirish (kichik/katta harflarga bog'liq emas)
+    q = hedef.lower()
+    topilganlar = []
+    try:
+        async for dialog in client.iter_dialogs(limit=500):
+            ent = dialog.entity
+            # Faqat foydalanuvchilar (guruh/kanal emas)
+            if not hasattr(ent, "first_name"):
+                continue
+            fname = (getattr(ent, "first_name", "") or "").lower()
+            lname = (getattr(ent, "last_name", "") or "").lower()
+            uname = (getattr(ent, "username", "") or "").lower()
+            fulln = f"{fname} {lname}".strip()
+            if q in fname or q in lname or q in uname or q in fulln:
+                topilganlar.append(ent)
+                if len(topilganlar) > 5:
+                    break
+    except Exception:
+        pass
+
+    if len(topilganlar) == 1:
+        return topilganlar[0], None
+    if len(topilganlar) > 1:
+        variantlar = ", ".join(
+            (f"@{e.username}" if getattr(e, "username", None)
+             else f"{e.first_name or ''} {e.last_name or ''}".strip())
+            for e in topilganlar[:5]
+        )
+        return None, f"bir necha odam topildi: {variantlar} — aniqroq @username yoki to'liq ism yozing"
+    return None, "topilmadi (mendagi so'nggi 500 ta suhbatda yo'q)"
+
+
+async def xabar_yubor(kim: str, matn: str) -> str:
+    """Asadbekning shaxsiy akkauntidan boshqa odamga xabar yuboradi.
+    kim: @username, telefon (+998...), yoki kontakt ismi (dialoglardan qidiriladi)."""
+    from telethon.errors import FloodWaitError, UserPrivacyRestrictedError
+    client = await _klient()
+    hedef = kim.strip()
+    entity, xato = await _entity_qidir(client, hedef)
+    if xato:
+        return f"XATO: {hedef} — {xato}"
+    try:
         await client.send_message(entity, matn)
         display = getattr(entity, "username", None) or getattr(entity, "first_name", "") or str(hedef)
         return f"OK @{display}" if getattr(entity, "username", None) else f"OK {display}"
-    except (UsernameNotOccupiedError, UsernameInvalidError, PeerIdInvalidError) as e:
-        return f"XATO: {hedef} topilmadi ({type(e).__name__})"
     except UserPrivacyRestrictedError:
         return f"XATO: {hedef} — maxfiylik sozlamalari yozishga ruxsat bermayapti"
     except FloodWaitError as e:
