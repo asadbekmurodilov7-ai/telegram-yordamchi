@@ -274,7 +274,7 @@ async def gemini_javob(system: str, user_text: str, max_tokens: int = 600) -> st
         return ""
     client = genai.Client(api_key=GEMINI_API_KEY)
     resp = await client.aio.models.generate_content(
-        model="gemini-flash-latest",
+        model="gemini-2.5-flash",
         contents=user_text,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -292,7 +292,7 @@ async def gemini_qidiruv_javob(system: str, contents, max_tokens: int = 1500) ->
         return ""
     client = genai.Client(api_key=GEMINI_API_KEY)
     resp = await client.aio.models.generate_content(
-        model="gemini-flash-latest",
+        model="gemini-2.5-flash",
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -1522,18 +1522,30 @@ async def _hujjat_kontenti(msg):
 
 
 async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ovozli xabarni Gemini bilan matnga o'giradi va oddiy matn xabaridek qayta ishlaydi.
-    Admin uchun — ai_javob'ga uzatiladi (post, eslatma, /yoz, hammasi ishlaydi).
-    Notanish uchun — qabulxona_javob'ga."""
+    """Ovozli xabar — FAQAT admin uchun va FAQAT kimga xabar yozish uchun.
+    'Xga yoz Y' turidagi buyruqni tushunadi. Boshqa hollarda — matn yozing deydi."""
     msg = update.effective_message
     if msg is None:
         return
     biznesmi = update.business_message is not None
     if biznesmi and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID:
         return
-    if not GEMINI_API_KEY:
+
+    _admin = ADMIN_CHAT_ID and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID
+
+    # Faqat admin uchun
+    if not _admin:
         try:
-            await msg.reply_text("Ovoz tushunish uchun GEMINI_API_KEY kerak.")
+            await msg.reply_text(
+                "Ovozli xabarlarni qabul qilmayman. Matn yozing — javob beraman."
+            )
+        except Exception:
+            pass
+        return
+
+    if not GEMINI_API_KEY or not story.sozlanganmi():
+        try:
+            await msg.reply_text("Ovoz orqali xabar yuborish uchun GEMINI va TG_SESSION kerak.")
         except Exception:
             pass
         return
@@ -1554,56 +1566,27 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # Gemini: transkripsiya + niyat aniqlash (bir chaqiruvda, o'zbek tiliga urg'u)
+    # Gemini bilan transkripsiya
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        system_transkript = (
-            "Sen o'zbek tilida gaplashadigan Asadbekning ovozli xabarini eshityapsan. "
-            "Vazifa: (1) aytilgan matnni aniq yozib ber, (2) niyatni aniqla.\n\n"
-            "TRANSKRIPSIYA QOIDALARI:\n"
-            "• Til: o'zbek (lotin harflari). Rus/ingliz so'zlarni o'sha holicha yoz.\n"
-            "• Ismlarni aynan eshitilganday yoz (Umid, Nurbek, Bekzod, Murodullayev, Sardor).\n"
-            "• O'zbekcha maxsus so'zlarga e'tibor: 'kichkina/kichkintoy' (kuchukcha emas), "
-            "'akaga/opaga/singilga', 'iPhone/telefon/kompyuter'.\n"
-            "• Buyruq fe'llarini aniq: 'yoz', 'yubor', 'ayt', 'qo'y'.\n"
-            "• Punktuatsiya qo'y.\n\n"
-            "NIYAT ANIQLASH:\n"
-            "• 'yoz' — Asadbek biror odamga xabar yuborishni buyursa. Misollar: "
-            "'Umidga yoz salom aka', 'Nurbekka ayt kelasan', 'Bekzodga yubor tayyor', "
-            "'@sardor ga yoz kelisin', 'kichkinaga yoz uxlab qoldi'.\n"
-            "• 'chat' — boshqa hamma holat: umumiy savol, post yozish, eslatma qo'shish, "
-            "kanal ochish, ma'lumot so'rash va h.k.\n\n"
-            "JAVOB FAQAT SHU JSON formatda:\n"
-            "{\n"
-            '  \"matn\": \"to\'liq transkripsiya\",\n'
-            '  \"niyat\": \"yoz\" | \"chat\",\n'
-            '  \"hedeflar\": [\"Umid\", \"@sardor\", ...] — niyat=yoz uchun,\n'
-            '  \"xabar_matni\": \"yuboriladigan sof matn\" — niyat=yoz uchun\n'
-            "}"
-        )
         resp = await client.aio.models.generate_content(
-            model="gemini-flash-latest",
+            model="gemini-2.5-flash",
             contents=[types.Content(role="user", parts=[
                 types.Part.from_bytes(data=audio_bytes, mime_type=mime),
-                types.Part.from_text(text="Tinglab, JSON qaytar."),
+                types.Part.from_text(text=(
+                    "Sen o'zbek tilida gaplashadigan ovozli xabarni tinglayapsan. "
+                    "Aynan aytilgan matnni o'zbek lotin harflari bilan yoz. "
+                    "Ismlarni aynan eshitilganday yoz. Punktuatsiya qo'y. "
+                    "Faqat matnni qaytar — hech qanday izoh, JSON yoki qavs yo'q."
+                )),
             ])],
             config=types.GenerateContentConfig(
-                system_instruction=system_transkript,
-                max_output_tokens=1500,
+                max_output_tokens=800,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
                 temperature=0.1,
             ),
         )
-        xom = (resp.text or "").strip()
-        if xom.startswith("```"):
-            xom = xom.strip("`")
-            xom = xom[4:] if xom.lower().startswith("json") else xom
-        bosh, oxir = xom.find("{"), xom.rfind("}")
-        data = json.loads(xom[bosh:oxir + 1]) if bosh != -1 and oxir != -1 else {}
-        ovoz_matn = (data.get("matn") or "").strip()
-        niyat = (data.get("niyat") or "chat").strip().lower()
-        hedeflar_v = [str(x).strip() for x in (data.get("hedeflar") or []) if x]
-        xabar_matni_v = (data.get("xabar_matni") or "").strip()
+        ovoz_matn = (resp.text or "").strip().strip('"').strip("'")
     except Exception as e:
         log.error("Ovoz Gemini xatosi: %s", e)
         try:
@@ -1613,7 +1596,10 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not ovoz_matn:
-        await msg.reply_text("Ovozdan hech narsa tushunmadim.")
+        try:
+            await msg.reply_text("Ovozdan hech narsa tushunmadim. Qaytadan urunib ko'ring.")
+        except Exception:
+            pass
         return
 
     # Foydalanuvchiga o'girilgan matnni ko'rsat
@@ -1622,20 +1608,51 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # ADMIN bo'lsa - ai_javob orqali (hamma tool va imkoniyat ishlaydi)
-    _admin = ADMIN_CHAT_ID and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID
-    if _admin:
+    # Regex bilan "Xga yoz Y" pattern
+    m = re.search(
+        r"^\s*(@?[A-Za-z0-9_\u0080-\uFFFF][A-Za-z0-9_\u0080-\uFFFF ]{0,40}?)"
+        r"\s*(?:ga|kka|ka|ya)\s+(?:yoz|yubor|ayt|jo['\u2018\u2019]nat)\s+(.+)$",
+        ovoz_matn.strip(),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
         try:
-            await ai_javob(update, context, text_override=ovoz_matn)
-        except Exception as e:
-            log.error("Ovoz->ai_javob xatosi: %s", e)
-    else:
-        # Notanish odam - qabulxona_javob
-        kim = msg.from_user.first_name if msg.from_user else "Foydalanuvchi"
+            await msg.reply_text(
+                "Ovozdan xabar yuborish niyati aniqlanmadi.\n"
+                "Namuna: \"Nurbekga yoz salom aka\" yoki \"Umidga ayt kelasan\"."
+            )
+        except Exception:
+            pass
+        return
+
+    hedef = m.group(1).strip()
+    xabar_matni = m.group(2).strip()
+    if not hedef or not xabar_matni:
         try:
-            await qabulxona_javob(msg, context, kim, ovoz_matn)
-        except Exception as e:
-            log.error("Ovoz->qabulxona xatosi: %s", e)
+            await msg.reply_text("Adresat yoki matn aniqlanmadi.")
+        except Exception:
+            pass
+        return
+
+    # Tasdiq flow
+    tasdiq_id = str(int(datetime.now().timestamp()))
+    navbat = json.loads(sozlama_ol("yoz_navbat", "{}") or "{}")
+    navbat[tasdiq_id] = {"hedeflar": [hedef], "matn": xabar_matni}
+    if len(navbat) > 20:
+        eng_yangi = sorted(navbat.keys(), reverse=True)[:20]
+        navbat = {k: navbat[k] for k in eng_yangi}
+    sozlama_qoy("yoz_navbat", json.dumps(navbat, ensure_ascii=False))
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yubor", callback_data=f"yoz:ok:{tasdiq_id}"),
+        InlineKeyboardButton("❌ Bekor", callback_data=f"yoz:no:{tasdiq_id}"),
+    ]])
+    try:
+        await msg.reply_text(
+            f"Shu matnni {hedef} ga yubormoqchimisiz?\n\n\"{xabar_matni}\"",
+            reply_markup=kb,
+        )
+    except Exception:
+        pass
 
 
 async def gemini_javob_call_for_admin(msg, context, ovoz_matn: str):
@@ -2036,7 +2053,7 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE, text_over
             try:
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 resp2 = await client.aio.models.generate_content(
-                    model="gemini-flash-latest",
+                    model="gemini-2.5-flash",
                     contents=[types.Content(
                         role="user",
                         parts=[types.Part.from_text(
