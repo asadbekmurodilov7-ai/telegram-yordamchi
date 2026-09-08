@@ -1522,8 +1522,9 @@ async def _hujjat_kontenti(msg):
 
 
 async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ovozli xabarni Gemini bilan matnga o'giradi. Admin uchun — 'yoz/yubor' niyati
-    bo'lsa tasdiq flow, aks holda oddiy suhbat."""
+    """Ovozli xabarni Gemini bilan matnga o'giradi va oddiy matn xabaridek qayta ishlaydi.
+    Admin uchun — ai_javob'ga uzatiladi (post, eslatma, /yoz, hammasi ishlaydi).
+    Notanish uchun — qabulxona_javob'ga."""
     msg = update.effective_message
     if msg is None:
         return
@@ -1553,35 +1554,44 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # Admin bo'lsa - niyat aniqlab olamiz (yoz/yubor yoki oddiy chat)
-    _admin = ADMIN_CHAT_ID and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID
+    # Gemini: transkripsiya + niyat aniqlash (bir chaqiruvda, o'zbek tiliga urg'u)
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        system_niyat = (
-            "Sen o'zbekcha ovozli xabarni tinglab, uni matnga o'girasan va foydalanuvchining "
-            "niyatini aniqlaysan. FAQAT JSON qaytar:\n"
+        system_transkript = (
+            "Sen o'zbek tilida gaplashadigan Asadbekning ovozli xabarini eshityapsan. "
+            "Vazifa: (1) aytilgan matnni aniq yozib ber, (2) niyatni aniqla.\n\n"
+            "TRANSKRIPSIYA QOIDALARI:\n"
+            "• Til: o'zbek (lotin harflari). Rus/ingliz so'zlarni o'sha holicha yoz.\n"
+            "• Ismlarni aynan eshitilganday yoz (Umid, Nurbek, Bekzod, Murodullayev, Sardor).\n"
+            "• O'zbekcha maxsus so'zlarga e'tibor: 'kichkina/kichkintoy' (kuchukcha emas), "
+            "'akaga/opaga/singilga', 'iPhone/telefon/kompyuter'.\n"
+            "• Buyruq fe'llarini aniq: 'yoz', 'yubor', 'ayt', 'qo'y'.\n"
+            "• Punktuatsiya qo'y.\n\n"
+            "NIYAT ANIQLASH:\n"
+            "• 'yoz' — Asadbek biror odamga xabar yuborishni buyursa. Misollar: "
+            "'Umidga yoz salom aka', 'Nurbekka ayt kelasan', 'Bekzodga yubor tayyor', "
+            "'@sardor ga yoz kelisin', 'kichkinaga yoz uxlab qoldi'.\n"
+            "• 'chat' — boshqa hamma holat: umumiy savol, post yozish, eslatma qo'shish, "
+            "kanal ochish, ma'lumot so'rash va h.k.\n\n"
+            "JAVOB FAQAT SHU JSON formatda:\n"
             "{\n"
             '  \"matn\": \"to\'liq transkripsiya\",\n'
             '  \"niyat\": \"yoz\" | \"chat\",\n'
-            '  \"hedeflar\": [\"@user1\" | \"+998...\" | \"Ism\"] — niyat=yoz bo\'lsa,\n'
-            '  \"xabar_matni\": \"yuboriladigan matn\" — niyat=yoz bo\'lsa\n'
-            "}\n\n"
-            "niyat=\"yoz\" bo'ladi agar foydalanuvchi biror odamga xabar yuborishni so'rasa: "
-            "\"Umidga yoz salom aka\", \"Bekzodga ayt kechga uchrashamiz\", "
-            "\"Aliga yubor tayyor bo'lsin\" va h.k. Bunda hedeflar[] ga adresatlar ismini yoz "
-            "(masalan \"Umid\"), xabar_matni ga aynan mijozga yuboriladigan matnni yoz.\n"
-            "Boshqa hollarda niyat=\"chat\", hedeflar va xabar_matni bo'sh."
+            '  \"hedeflar\": [\"Umid\", \"@sardor\", ...] — niyat=yoz uchun,\n'
+            '  \"xabar_matni\": \"yuboriladigan sof matn\" — niyat=yoz uchun\n'
+            "}"
         )
         resp = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=[types.Content(role="user", parts=[
                 types.Part.from_bytes(data=audio_bytes, mime_type=mime),
-                types.Part.from_text(text="Ovozli xabar yuqorida. Tahlil qil va JSON qaytar."),
+                types.Part.from_text(text="Tinglab, JSON qaytar."),
             ])],
             config=types.GenerateContentConfig(
-                system_instruction=system_niyat,
-                max_output_tokens=800,
+                system_instruction=system_transkript,
+                max_output_tokens=1500,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
+                temperature=0.1,
             ),
         )
         xom = (resp.text or "").strip()
@@ -1590,6 +1600,10 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             xom = xom[4:] if xom.lower().startswith("json") else xom
         bosh, oxir = xom.find("{"), xom.rfind("}")
         data = json.loads(xom[bosh:oxir + 1]) if bosh != -1 and oxir != -1 else {}
+        ovoz_matn = (data.get("matn") or "").strip()
+        niyat = (data.get("niyat") or "chat").strip().lower()
+        hedeflar_v = [str(x).strip() for x in (data.get("hedeflar") or []) if x]
+        xabar_matni_v = (data.get("xabar_matni") or "").strip()
     except Exception as e:
         log.error("Ovoz Gemini xatosi: %s", e)
         try:
@@ -1598,53 +1612,23 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    ovoz_matn = (data.get("matn") or "").strip()
-    niyat = (data.get("niyat") or "chat").strip().lower()
-
-    # ADMIN uchun /yoz niyati bo'lsa - tasdiq flow
-    if _admin and niyat == "yoz" and story.sozlanganmi():
-        hedeflar = [str(x).strip() for x in (data.get("hedeflar") or []) if x]
-        xabar_matni = (data.get("xabar_matni") or "").strip()
-        if hedeflar and xabar_matni:
-            tasdiq_id = str(int(datetime.now().timestamp()))
-            navbat = json.loads(sozlama_ol("yoz_navbat", "{}") or "{}")
-            navbat[tasdiq_id] = {"hedeflar": hedeflar, "matn": xabar_matni}
-            if len(navbat) > 20:
-                eng_yangi = sorted(navbat.keys(), reverse=True)[:20]
-                navbat = {k: navbat[k] for k in eng_yangi}
-            sozlama_qoy("yoz_navbat", json.dumps(navbat, ensure_ascii=False))
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Yubor", callback_data=f"yoz:ok:{tasdiq_id}"),
-                InlineKeyboardButton("❌ Bekor", callback_data=f"yoz:no:{tasdiq_id}"),
-            ]])
-            kimlar = ", ".join(hedeflar)
-            await msg.reply_text(
-                f"🎤 Ovoz: \"{ovoz_matn}\"\n\n"
-                f"Shu matnni {kimlar} ga yubormoqchimisiz?\n\n\"{xabar_matni}\"",
-                reply_markup=kb,
-            )
-            return
-
-    # Boshqa hollarda - matnni ko'rsatib, oddiy ai_javob yo'lidan yubor
     if not ovoz_matn:
         await msg.reply_text("Ovozdan hech narsa tushunmadim.")
         return
 
+    # Foydalanuvchiga o'girilgan matnni ko'rsat
     try:
         await msg.reply_text(f"🎤 \"{ovoz_matn}\"")
     except Exception:
         pass
 
-    # Ovoz matnini xabar sifatida oddiy ai_javob'ga uzatamiz
-    # msg.text yo'q — shuning uchun context.chat_data ga qo'yamiz va manual chaqiramiz
+    # ADMIN bo'lsa - ai_javob orqali (hamma tool va imkoniyat ishlaydi)
+    _admin = ADMIN_CHAT_ID and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID
     if _admin:
-        # Admin uchun oddiy suhbat — matnni ai_javob orqali qayta ishla
         try:
-            msg._text_from_voice = ovoz_matn  # marker
-            # Direct chat
-            await gemini_javob_call_for_admin(msg, context, ovoz_matn)
-        except Exception:
-            pass
+            await ai_javob(update, context, text_override=ovoz_matn)
+        except Exception as e:
+            log.error("Ovoz->ai_javob xatosi: %s", e)
     else:
         # Notanish odam - qabulxona_javob
         kim = msg.from_user.first_name if msg.from_user else "Foydalanuvchi"
@@ -1815,12 +1799,12 @@ async def menyu_ishla(update: Update, context: ContextTypes.DEFAULT_TYPE, kirish
     return None
 
 
-async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE, text_override: str | None = None):
     msg = update.effective_message
     if msg is None:
         return
 
-    kirish = xabar_matni(msg)
+    kirish = text_override if text_override else xabar_matni(msg)
     if not kirish and not msg.photo and not msg.document:
         return
 
