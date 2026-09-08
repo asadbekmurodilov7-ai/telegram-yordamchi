@@ -274,7 +274,7 @@ async def gemini_javob(system: str, user_text: str, max_tokens: int = 600) -> st
         return ""
     client = genai.Client(api_key=GEMINI_API_KEY)
     resp = await client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=user_text,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -292,7 +292,7 @@ async def gemini_qidiruv_javob(system: str, contents, max_tokens: int = 1500) ->
         return ""
     client = genai.Client(api_key=GEMINI_API_KEY)
     resp = await client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -1582,7 +1582,7 @@ async def ovoz_javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "}"
         )
         resp = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=[types.Content(role="user", parts=[
                 types.Part.from_bytes(data=audio_bytes, mime_type=mime),
                 types.Part.from_text(text="Tinglab, JSON qaytar."),
@@ -2036,7 +2036,7 @@ async def ai_javob(update: Update, context: ContextTypes.DEFAULT_TYPE, text_over
             try:
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 resp2 = await client.aio.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-2.0-flash",
                     contents=[types.Content(
                         role="user",
                         parts=[types.Part.from_text(
